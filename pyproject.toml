@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentlog"
+version = "0.1.0"
+description = "Read AI coding agent transcripts, extract what was tried and what failed, key it to files and routes."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "anthropic>=0.40",
+    "pydantic>=2.6",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+agentlog = "agentlog.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentlog"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer's whole API is function calls in argument defaults.
+"src/agentlog/cli.py" = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+# Run against the source tree directly, so the suite never depends on an
+# editable install having been wired up correctly.
+pythonpath = ["src"]

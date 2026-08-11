@@ -1,0 +1,73 @@
+# agentlog
+
+Reads AI coding agent transcripts, extracts what was tried and what failed, keys those records to files and routes, and feeds them back to a future agent working on the same code.
+
+Git records what changed. The chat records why, and every dead end along the way. Nobody joins them, so an agent opening a repo three weeks later re-tries the thing that already failed.
+
+## The failure this fixes
+
+You spend an hour on an export endpoint. You try streaming the response, it times out. You bump the worker limit, still times out. You switch to a background job, it works, you commit `fix: export timeout`.
+
+Git has one commit. Both failures are gone, because broken versions don't get committed. Three weeks later an agent opens that file and tries streaming.
+
+The transcript had all three attempts. This tool reads it.
+
+## Status: v0.1
+
+v0.1 is the read-only half of the pipeline. It writes nothing, anywhere.
+
+```
+reader → parser → segmenter → anchors → redaction → extraction
+```
+
+```bash
+agentlog capture ~/.claude/projects/<project>/<session>.jsonl --stage turns
+agentlog capture ... --stage segments   # work units, by overlapping file sets
+agentlog capture ... --stage anchors    # files, routes, symbols, branch, issue
+agentlog capture ... --stage payload    # the exact scrubbed text that would be sent — free
+agentlog capture ... --stage extract    # one model call per segment (needs ANTHROPIC_API_KEY)
+```
+
+Persistence (`.agentlog/records.jsonl` + a derived SQLite index), retrieval, and the hooks that close the loop are v0.2 and v0.3.
+
+## How it works
+
+**Anchors are computed, never generated.** Files, routes, symbols, branch, issue, and commits come from git and from parsing source. The model never produces a key — a model that invents keys calls one feature three names across three sessions and the timeline fragments.
+
+**Redaction runs before the network, and the code enforces it.** `redaction.scrub()` is the only way to obtain a `Scrubbed` value, and `external/anthropic.py` accepts nothing else. Swapping the order does not compile past the tests. Scrubbing failures drop the segment rather than proceeding: a lost record is a minor loss, a written credential is not.
+
+**One model call per segment, Haiku tier.** This is classification, not reasoning. The response is validated against a pydantic schema before anything is written; a malformed response retries once, then the segment is skipped with a warning.
+
+**Agent reasoning is not available, and the design does not assume it is.** Transcripts on current models store `thinking` blocks whose text is empty — `display` defaults to `"omitted"`, so the reasoning never reaches disk. Verified against a real 172-turn session: 51 thinking blocks, all empty. The signals extraction actually runs on are assistant text, tool calls, and tool errors. That is enough — a failed test and an abandoned approach are both observable — but anything built on top of this should not expect the agent's reasoning to be there.
+
+**No embeddings, no vector store.** Deliberate. Missing a record leaves you exactly where you are today, but returning a near-match tells the agent "Redis caching deadlocked here" about a different endpoint, and now it avoids a valid approach for a fake reason. Keyword and exact anchor matching — poor recall, perfect precision — is the correct trade.
+
+## Configuration
+
+Defaults are in `core/config.py`; a repo overrides them in `.agentlog/config.json`. The Anthropic key is read from `ANTHROPIC_API_KEY` at the point of use and is never written to disk.
+
+## Development
+
+```bash
+uv venv && uv pip install -e ".[dev]"
+.venv/bin/python -m pytest
+.venv/bin/ruff check .
+```
+
+The suite sets `pythonpath = ["src"]`, so it runs against the source tree and does not depend on the editable install being wired up. If the `agentlog` console script cannot find the package, `PYTHONPATH=src python -m agentlog.cli ...` always works.
+
+Tests never hit the network: extraction is always given a fake client, and anchor resolution is offline against a fixture git repo. Fixture transcripts are hand-written and contain no real secrets.
+
+## Prior art
+
+**[projectmem](https://arxiv.org/abs/2606.12329)** (Malo & Qiu, MIT) is the closest system to this one, and worth reading before this one: event-sourced plain text, a pre-action warning gate, MCP-native. It captures from git hooks and manual entry.
+
+agentlog differs in three ways: capture is transcript-first rather than git-first, so it sees attempts that were never committed; retrieval is keyed to computed anchors (file, route, symbol, issue) rather than free-text memory; and capture is timed to the compaction boundary, the moment a long session loses its own history.
+
+Also relevant: **Codified Context** ([arXiv:2602.20478](https://arxiv.org/abs/2602.20478)) on plain-text conventions with keyword-retrieved specs, **ESAA** ([arXiv:2602.23193](https://arxiv.org/abs/2602.23193)) on event sourcing for SE agents, and **Reflexion** ([arXiv:2303.11366](https://arxiv.org/abs/2303.11366)) on verbal feedback from failed trials within a task.
+
+Convergent design is normal in this space. Being straight about it reads better than claiming novelty that doesn't hold.
+
+## License
+
+MIT.
