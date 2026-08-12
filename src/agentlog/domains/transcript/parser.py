@@ -38,7 +38,11 @@ _PATH_TOKEN = re.compile(r"[A-Za-z0-9_./\-]*[A-Za-z0-9_\-]\.[A-Za-z0-9]{1,10}")
 _MAX_TEXT = 2000
 _MAX_THINKING = 400
 _MAX_TOOL_TEXT = 300
-_MAX_RESULT_TEXT = 600
+# Tool output is kept from both ends. Test runners, linters, compilers and
+# build tools all print detail first and the verdict last, so head-only
+# truncation throws away the one line that says whether it worked.
+_RESULT_HEAD = 300
+_RESULT_TAIL = 600
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -46,6 +50,19 @@ def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + " …[truncated]"
+
+
+def _truncate_ends(text: str, head: int, tail: int) -> str:
+    """Keep both ends of a long output, eliding the middle.
+
+    The tail is the larger half deliberately: `5 failed, 135 passed` is the
+    whole signal, and it is the last line of a 2,600-character result.
+    """
+    text = text.strip()
+    if len(text) <= head + tail:
+        return text
+    elided = len(text) - head - tail
+    return f"{text[:head].rstrip()}\n…[{elided} chars elided]…\n{text[-tail:].lstrip()}"
 
 
 def _parse_timestamp(raw: object) -> datetime | None:
@@ -228,7 +245,7 @@ def _parse_user(obj: dict, index: int) -> Turn | None:
                 ToolResult(
                     tool_use_id=str(block.get("tool_use_id") or ""),
                     is_error=bool(block.get("is_error")),
-                    text=_truncate(text, _MAX_RESULT_TEXT),
+                    text=_truncate_ends(text, _RESULT_HEAD, _RESULT_TAIL),
                 )
             )
         elif block.get("type") == "text":

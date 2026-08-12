@@ -276,3 +276,40 @@ def test_absolute_repo_paths_are_stripped_from_rendered_text(
     normalized = parser.normalize_paths(transcript, git_repo, {"src/service.py"})
     assert normalized.turns[0].tool_calls[0].text == "Write(src/service.py)"
     assert str(git_repo) not in normalized.turns[0].tool_calls[0].text
+
+
+def test_tool_output_keeps_the_verdict_at_the_end(tmp_path: Path, git_repo: Path) -> None:
+    """Head-only truncation discards the one line that says whether it worked.
+
+    Found by evaluating extraction on a real session: `5 failed, 135 passed`
+    sat at character 2572 of a pytest result and never reached the model, so
+    no test failure in the whole session was detectable.
+    """
+    body = "detail line\n" * 400 + "FAILED tests/test_x.py::test_y\n5 failed, 135 passed in 1.12s"
+    path = write_transcript(
+        tmp_path / "long_result.jsonl",
+        [
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t1",
+                            "content": body,
+                            "is_error": True,
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    transcript = parser.parse_file(path)
+    kept = transcript.turns[0].tool_results[0].text
+
+    assert "5 failed, 135 passed" in kept, "the verdict must survive truncation"
+    assert "FAILED tests/test_x.py::test_y" in kept
+    assert "detail line" in kept, "the head must survive too"
+    assert "elided" in kept
+    assert len(kept) < len(body)
