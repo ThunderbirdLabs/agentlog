@@ -9,7 +9,7 @@ Bump `PROMPT_VERSION` on any change to `SYSTEM` below, however small.
 
 from __future__ import annotations
 
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v3"
 
 SYSTEM = """\
 You read a slice of a coding session between a person and an AI coding agent, \
@@ -59,6 +59,11 @@ separately and attached for you. Naming them yourself fragments the timeline. \
 Naming a general technique is fine and often necessary — "streaming the \
 response", "an in-memory cache" — the ban is on identifiers, not on being \
 specific about the approach.
+- Configuration keys, settings, parameters and flags are the exception: name \
+them exactly. When work is against a library or an SDK, the knob that was \
+turned is the whole record. Someone weeks later searches for the setting, not \
+for the file that set it — and often for the name it had back when it last \
+worked. Say which knob, what it was set to in ordinary words, and what happened.
 - Never refer to the numbering of this slice. Those numbers mean nothing \
 outside this message, and the record outlives it.
 - Summary is exactly one sentence.

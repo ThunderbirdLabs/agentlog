@@ -205,6 +205,35 @@ def working_tree_line_ranges(repo: Path) -> dict[str, list[tuple[int, int]]]:
     return _parse_hunks(out) if out else {}
 
 
+def _parse_diff_lines(out: str) -> dict[str, list[tuple[str, str]]]:
+    changed: dict[str, list[tuple[str, str]]] = {}
+    current: str | None = None
+    for line in out.splitlines():
+        if line.startswith("+++ "):
+            target = line[4:].strip()
+            current = (
+                None if target == "/dev/null" else target[2:] if target.startswith("b/") else target
+            )
+        elif line.startswith("--- ") or line.startswith("@@"):
+            continue
+        elif current and line[:1] in ("+", "-") and not line.startswith(("+++", "---")):
+            changed.setdefault(current, []).append((line[0], line[1:]))
+    return changed
+
+
+def changed_lines(repo: Path, sha: str | None = None) -> dict[str, list[tuple[str, str]]]:
+    """Added and removed lines per file, as `(sign, text)` pairs.
+
+    Both sides are kept deliberately. When a config key is *renamed*, the old
+    name only exists on the removed side — and the old name is what a search
+    six weeks later will be reaching for, because it is the name that was in
+    use when the thing last worked.
+    """
+    args = ["show", "--unified=0", "--format=", sha] if sha else ["diff", "HEAD", "--unified=0"]
+    out = _run(repo, *args)
+    return _parse_diff_lines(out) if out else {}
+
+
 def file_at(repo: Path, sha: str, path: str) -> str | None:
     return _run(repo, "show", f"{sha}:{path}")
 

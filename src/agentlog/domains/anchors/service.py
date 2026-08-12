@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from agentlog.core.config import Config
-from agentlog.domains.anchors import git, routes, symbols
+from agentlog.domains.anchors import git, routes, settings, symbols
 from agentlog.domains.anchors.schemas import Anchors
 from agentlog.domains.transcript.schemas import Segment
 
@@ -44,13 +44,21 @@ def resolve(segment: Segment, cfg: Config, repo: Path | None = None) -> Anchors:
         files[path] = None
 
     line_ranges: dict[str, list[tuple[int, int]]] = {}
+    diff_lines: dict[str, list[tuple[str, str]]] = {}
     for sha in commits:
         _merge_ranges(line_ranges, git.changed_line_ranges(repo, sha))
+        for path, lines in git.changed_lines(repo, sha).items():
+            diff_lines.setdefault(path, []).extend(lines)
     _merge_ranges(line_ranges, git.working_tree_line_ranges(repo))
+    for path, lines in git.changed_lines(repo).items():
+        diff_lines.setdefault(path, []).extend(lines)
 
     found_routes: dict[str, None] = {}
     found_symbols: dict[str, None] = {}
+    found_settings: dict[str, None] = {}
     for path in files:
+        for key in settings.extract(path, diff_lines.get(path, [])):
+            found_settings[key] = None
         if not path.endswith(_SOURCE_SUFFIXES):
             continue
         source = git.read_file(repo, path, head)
@@ -67,6 +75,7 @@ def resolve(segment: Segment, cfg: Config, repo: Path | None = None) -> Anchors:
         files=tuple(files),
         routes=tuple(found_routes),
         symbols=tuple(found_symbols),
+        settings=tuple(found_settings),
         branch=branch_name,
         issue=git.issue_from_branch(branch_name, cfg.issue_pattern),
         commits=commits,

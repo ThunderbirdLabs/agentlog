@@ -207,3 +207,13 @@ def test_prompt_keeps_constraints_discovered_through_failure() -> None:
 def test_prompt_forbids_referencing_the_slice_numbering() -> None:
     """v1 produced a record citing a line number of the prompt itself."""
     assert "numbering of this slice" in prompts.SYSTEM
+
+
+def test_prompt_requires_naming_settings_exactly() -> None:
+    """For SDK work the knob is the record, so it is the one identifier kept.
+
+    Files and commits stay banned; a configuration key is itself an anchor.
+    """
+    system = prompts.SYSTEM
+    assert "Configuration keys, settings, parameters and flags are the exception" in system
+    assert "name it had back when it last worked" in system or "it last worked" in system

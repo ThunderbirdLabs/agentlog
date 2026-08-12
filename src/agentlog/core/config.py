@@ -44,6 +44,12 @@ class SegmentationConfig:
     max_gap_minutes: int = 120
     # Segments shorter than this are noise.
     min_turns: int = 2
+    # Hold a segment open while a failure is unresolved, even if the file set
+    # shifts. A fix usually touches a different file than the failing check
+    # did, so without this "tried X, it failed, then Y worked" splits across
+    # segments and the outcome becomes unknowable — which is the one thing a
+    # timeline has to get right.
+    hold_open_on_failure: bool = True
     # A segment with no files has no anchors, so nothing could ever retrieve
     # it. Dropping it is better than logging an unreachable record.
     require_files: bool = True

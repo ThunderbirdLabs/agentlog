@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 from agentlog.core.config import Config
-from agentlog.domains.anchors import git, routes, symbols
+from agentlog.domains.anchors import git, routes, settings, symbols
 from agentlog.domains.anchors import service as anchors_service
 
 from .conftest import make_segment
@@ -286,3 +286,86 @@ def test_ignored_returns_empty_for_no_paths(git_repo: Path) -> None:
 
 def test_ignored_returns_empty_when_nothing_matches(git_repo: Path) -> None:
     assert git.ignored(git_repo, {"src/service.py"}) == set()
+
+
+# --------------------------------------------------------------------------
+# settings — the anchor that matters for SDK and config work
+# --------------------------------------------------------------------------
+
+
+def test_python_kwargs_become_settings() -> None:
+    changed = [("+", "    result = run(fill_occlusion_holes=True, keypoint_density=0.5)")]
+    found = settings.extract("worker/pipeline.py", changed)
+    assert "fill_occlusion_holes" in found
+    assert "keypoint_density" in found
+
+
+def test_a_renamed_key_is_captured_from_both_sides_of_the_diff() -> None:
+    """The exact three-day failure this anchor exists for.
+
+    A key gets renamed, the thing breaks, and six weeks later you search for
+    the *old* name — the one that was in use the last time it worked. If only
+    the added side were kept, that search would find nothing.
+    """
+    changed = [
+        ("-", "    splitter_chunk_size = 512"),
+        ("+", "    chunk_size_for_splitter = 512"),
+    ]
+    found = settings.extract("worker/config.py", changed)
+    assert "splitter_chunk_size" in found, "the old name must survive its own removal"
+    assert "chunk_size_for_splitter" in found
+
+
+def test_json_and_yaml_keys() -> None:
+    assert "max_workers" in settings.extract("config.json", [("+", '  "max_workers": 8,')])
+    assert "densify_preset" in settings.extract("cfg.yaml", [("+", "densify_preset: rapid")])
+
+
+def test_screaming_case_env_keys() -> None:
+    assert "PIX4D_LICENSE_PATH" in settings.extract(".env", [("+", "PIX4D_LICENSE_PATH=/opt/x")])
+
+
+def test_cli_flags_are_settings() -> None:
+    found = settings.extract("run.sh", [("+", "pix4d --image-scale 0.5 --fast-mode")])
+    assert "image_scale" in found
+    assert "fast_mode" in found
+
+
+def test_camel_case_keys() -> None:
+    assert "keypointDensity" in settings.extract("worker.ts", [("+", "  keypointDensity: 0.5,")])
+
+
+def test_comments_are_not_settings() -> None:
+    """A key named in a comment was not turned, and stale comments mislead."""
+    changed = [
+        ("+", "    # fill_occlusion_holes = True  # we tried this, it did nothing"),
+        ("+", "    // legacy_mode: true"),
+    ]
+    assert settings.extract("worker/pipeline.py", changed) == []
+
+
+def test_locals_and_structure_words_are_not_settings() -> None:
+    changed = [
+        ("+", "    for item in items:"),
+        ("+", "        val = obj.get(key)"),
+        ("+", "    result = 1"),
+        ("+", "    def render(self):"),
+    ]
+    assert settings.extract("src/a.py", changed) == []
+
+
+def test_non_config_files_yield_nothing() -> None:
+    assert settings.extract("README.md", [("+", "max_workers: 8")]) == []
+
+
+def test_settings_anchor_resolves_end_to_end(git_repo: Path) -> None:
+    """A knob renamed in the working tree shows up on both sides."""
+    target = git_repo / "src" / "service.py"
+    target.write_text(
+        "def run():\n    return export(fill_occlusion_holes=True, max_workers=4)\n",
+        encoding="utf-8",
+    )
+    cfg = Config(repo_root=git_repo)
+    anchors = anchors_service.resolve(make_segment(files=("src/service.py",)), cfg, git_repo)
+    assert "fill_occlusion_holes" in anchors.settings
+    assert "max_workers" in anchors.settings

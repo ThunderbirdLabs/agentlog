@@ -19,11 +19,23 @@ Two details do most of the work:
 
 from __future__ import annotations
 
+import re
 from collections import deque
 from datetime import timedelta
 
 from agentlog.core.config import SegmentationConfig
 from agentlog.domains.transcript.schemas import Segment, Transcript, Turn
+
+# Whether a check failed or passed has to be read out of the text, not just the
+# tool's error flag. A pipeline like `pytest | tail` exits 0 and reports no
+# error while printing five failures, and that is a normal way to run a test
+# suite — so the flag alone misses exactly the runs that matter.
+_FAILURE_TEXT = re.compile(
+    r"(?m)^\s*FAILED\b|\b\d+ failed\b|Traceback \(most recent call last\)|^\s*E\s+\w*Error\b"
+)
+_SUCCESS_TEXT = re.compile(
+    r"(?m)\b\d+ passed\b|All checks passed|\bBuild succeeded\b|\b0 errors?\b"
+)
 
 
 def _union(entries) -> set[str]:
@@ -31,6 +43,20 @@ def _union(entries) -> set[str]:
     for entry in entries:
         files |= entry
     return files
+
+
+def _shows_failure(turn: Turn) -> bool:
+    if turn.had_error:
+        return True
+    return any(_FAILURE_TEXT.search(result.text) for result in turn.tool_results)
+
+
+def _shows_success(turn: Turn) -> bool:
+    """A clean verification. Checked only after `_shows_failure` says no.
+
+    `5 failed, 135 passed` matches both patterns, and it is a failure.
+    """
+    return any(_SUCCESS_TEXT.search(result.text) for result in turn.tool_results)
 
 
 def _build(
@@ -112,6 +138,11 @@ def segment(transcript: Transcript, cfg: SegmentationConfig | None = None) -> li
             return turn.timestamp - previous.timestamp > timedelta(minutes=cfg.max_gap_minutes)
         return False
 
+    # True once a check has failed and nothing has verified clean since. While
+    # it holds, the file-set rule cannot end the segment — the fix and its
+    # confirming run belong with the failure that caused them.
+    unresolved = False
+
     for turn in transcript.turns:
         if hard_boundary(turn):
             current.extend(pending)
@@ -119,6 +150,12 @@ def segment(transcript: Transcript, cfg: SegmentationConfig | None = None) -> li
             pending_files.clear()
             flush()
             recent.clear()
+            unresolved = False
+
+        if _shows_failure(turn):
+            unresolved = True
+        elif unresolved and _shows_success(turn):
+            unresolved = False
 
         files = frozenset(turn.paths)
         if not files:
@@ -129,6 +166,12 @@ def segment(transcript: Transcript, cfg: SegmentationConfig | None = None) -> li
 
         window = _union(recent)
         if not window or (files & window):
+            accept(turn, files)
+            continue
+
+        if cfg.hold_open_on_failure and unresolved:
+            # A shift away from the failing file is usually the fix, not new
+            # work. Absorb it; `max_turns` and the time gap still bound this.
             accept(turn, files)
             continue
 

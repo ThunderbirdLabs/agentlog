@@ -16,6 +16,9 @@ class Anchors(BaseModel):
     files: tuple[str, ...] = ()
     routes: tuple[str, ...] = ()
     symbols: tuple[str, ...] = ()
+    # Configuration keys the change turned. For work against a library or an
+    # SDK this is the anchor that matters — the knob, not the file that set it.
+    settings: tuple[str, ...] = ()
     branch: str | None = None
     # The branch-to-issue link is the feature key. `feat/THU-142-export` gives a
     # stable feature identity for free — no clustering, no labelling, no drift.
@@ -25,4 +28,4 @@ class Anchors(BaseModel):
 
     @property
     def is_empty(self) -> bool:
-        return not (self.files or self.routes or self.symbols or self.issue)
+        return not (self.files or self.routes or self.symbols or self.settings or self.issue)
