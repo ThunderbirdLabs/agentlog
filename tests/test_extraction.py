@@ -82,8 +82,8 @@ def test_empty_records_is_valid() -> None:
 
 def test_prompt_forbids_literals_and_keys() -> None:
     system = prompts.SYSTEM
-    assert "Never include code" in system
-    assert "Never name a file, route, branch, or commit" in system
+    assert "Never reproduce code" in system
+    assert "Never name a file, route, branch, commit, or test" in system
     assert "one sentence" in system
     assert "empty array" in system
 
@@ -185,3 +185,25 @@ def test_an_empty_response_is_a_normal_outcome() -> None:
     assert not result.dropped
     assert result.candidates == ()
     assert result.drop_reason is None
+
+
+def test_prompt_permits_technique_names_while_banning_identifiers() -> None:
+    """The v1 rule was both violated and too blunt.
+
+    Records must be able to say "streaming the response" — that is the whole
+    content of a dead end — while still not naming files or tests.
+    """
+    system = prompts.SYSTEM
+    assert "the ban is on identifiers, not on being specific" in system
+    assert "Never name a file, route, branch, commit, or test" in system
+
+
+def test_prompt_keeps_constraints_discovered_through_failure() -> None:
+    """A failure fixed in the same slice still leaves a durable constraint."""
+    assert "still a record" in prompts.SYSTEM
+    assert "Record the constraint, not the repair" in prompts.SYSTEM
+
+
+def test_prompt_forbids_referencing_the_slice_numbering() -> None:
+    """v1 produced a record citing a line number of the prompt itself."""
+    assert "numbering of this slice" in prompts.SYSTEM
