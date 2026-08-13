@@ -88,3 +88,19 @@ def test_a_reinstall_after_moving_updates_the_interpreter(git_repo: Path) -> Non
     new = (git_repo / ".claude" / "hooks" / "agentlog-sessionstart.sh").read_text(encoding="utf-8")
     assert "/new/python" in new
     assert "/old/python" not in new
+
+
+def test_claude_md_block_is_added_and_replaced(git_repo: Path) -> None:
+    """Without this the CLI is installed and the agent never reaches for it."""
+    (git_repo / "CLAUDE.md").write_text("# My project\n\nExisting notes.\n", encoding="utf-8")
+
+    install.install(git_repo)
+    text = (git_repo / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "Existing notes." in text
+    assert "agentlog file <path>" in text
+    assert text.count(install._CLAUDE_MD_BEGIN) == 1
+
+    install.install(git_repo)
+    again = (git_repo / "CLAUDE.md").read_text(encoding="utf-8")
+    assert again.count(install._CLAUDE_MD_BEGIN) == 1, "a re-run must not duplicate the block"
+    assert "Existing notes." in again

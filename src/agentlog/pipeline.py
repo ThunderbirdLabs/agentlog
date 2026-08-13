@@ -240,3 +240,107 @@ def pending(cfg: Config) -> list[Path]:
     if not queue.is_dir():
         return []
     return sorted(queue.glob("*.json"))
+
+
+def _record_from_payload(payload: dict, candidate, extractor: str) -> Record:  # noqa: ANN001
+    from datetime import datetime
+
+    from agentlog.domains.anchors.schemas import Anchors
+
+    occurred = payload.get("occurred_at")
+    return Record.build(
+        candidate,
+        Anchors.model_validate(payload["anchors"]),
+        payload["session_id"],
+        payload["start_turn"],
+        payload["end_turn"],
+        extractor,
+        occurred_at=datetime.fromisoformat(occurred) if occurred else None,
+    )
+
+
+def drain(
+    cfg: Config,
+    client=None,  # noqa: ANN001 - ModelClient, or None when results are supplied
+    results_dir: Path | None = None,
+    limit: int = 0,
+) -> RunResult:
+    """Turn queued payloads into records.
+
+    Two drivers, one queue. With a `client` this calls the model directly; with
+    `results_dir` it ingests JSON produced elsewhere — which is how the same
+    queue can be drained by a session running on a subscription instead of an
+    API key. Either way the records are identical and the `extractor` field
+    records which produced them.
+
+    A drained payload is deleted. A payload that yields nothing is deleted too:
+    re-running it would cost the same and learn the same nothing.
+    """
+    from agentlog.domains.extraction import prompts
+    from agentlog.domains.extraction.schemas import ExtractionResponse
+
+    result = RunResult()
+    queued = pending(cfg)
+    if limit > 0:
+        queued = queued[:limit]
+
+    for path in queued:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.warning("unreadable queued payload %s: %s", path, exc)
+            continue
+
+        response = None
+        extractor = prompts.extractor_id(cfg.model)
+        if results_dir is not None:
+            candidate_file = results_dir / f"{payload['hash']}.json"
+            if not candidate_file.is_file():
+                # No result supplied for this unit. Leave it queued — a partial
+                # drain must not silently discard the rest of the backlog.
+                continue
+            try:
+                response = ExtractionResponse.model_validate_json(
+                    candidate_file.read_text(encoding="utf-8")
+                )
+            except Exception as exc:  # noqa: BLE001 - a bad result is a skip, not a crash
+                log.warning("invalid result for %s: %s", payload["hash"], exc)
+                result.dropped += 1
+                continue
+        elif client is not None:
+            from agentlog.core.redaction import scrub
+
+            scrubbed = scrub(payload["prompt"])
+            for _attempt in (1, 2):
+                try:
+                    response = client.classify(prompts.SYSTEM, scrubbed, ExtractionResponse)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("extraction call failed: %s", exc)
+                    response = None
+                if response is not None:
+                    break
+            if response is None:
+                result.dropped += 1
+                result.segments_new += 1
+                path.unlink(missing_ok=True)
+                continue
+        else:
+            raise ValueError("drain needs either a client or a results directory")
+
+        result.segments_new += 1
+        result.input_chars += len(payload.get("prompt", ""))
+
+        from agentlog.core.redaction import scrub_record_field
+
+        for candidate in response.records:
+            cleaned = candidate.model_copy(
+                update={
+                    "summary": scrub_record_field(candidate.summary),
+                    "detail": scrub_record_field(candidate.detail),
+                }
+            )
+            result.records.append(_record_from_payload(payload, cleaned, extractor))
+        path.unlink(missing_ok=True)
+
+    log_module.append(cfg.data_dir, result.records)
+    return result

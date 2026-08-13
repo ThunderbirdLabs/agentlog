@@ -64,6 +64,12 @@ class Config:
     issue_pattern: str = r"\b([A-Z][A-Z0-9]{1,9}-\d+)\b"
     retention_days: int = 30
     token_budget: int = 1500
+    # Sibling repos whose logs this one reads alongside its own. One agent
+    # working across a backend and a frontend should get one answer, not two —
+    # but each repo keeps its own log, because anchors are repo-relative and a
+    # log that travels with its repo can be reviewed and shared like any other
+    # file in it.
+    repos: tuple[str, ...] = ()
     segmentation: SegmentationConfig = field(default_factory=SegmentationConfig)
 
     @property
@@ -115,6 +121,7 @@ def load(repo_root: Path) -> Config:
             issue_pattern=cfg.issue_pattern,
             retention_days=cfg.retention_days,
             token_budget=cfg.token_budget,
+            repos=cfg.repos,
             segmentation=cfg.segmentation,
         )
     return cfg

@@ -19,7 +19,7 @@ from typing import Optional
 
 import typer
 
-from agentlog import install, pipeline
+from agentlog import install, pipeline, workspace
 from agentlog.core import config as config_module
 from agentlog.core.errors import AgentlogError
 from agentlog.core.logging import configure, get_logger
@@ -320,11 +320,17 @@ def _data_dir(repo: Optional[Path]) -> tuple[Path, "config_module.Config"]:  # n
     return cfg.data_dir, cfg
 
 
+def _sources(cfg) -> list[tuple[str, Path]]:  # noqa: ANN001
+    return [(m.name, m.data_dir) for m in workspace.members(cfg)]
+
+
 def _format_hit(hit, show_id: bool = True) -> list[str]:  # noqa: ANN001
     record = hit.record
     label = record.kind + (f"/{record.outcome}" if record.outcome else "")
     when = record.occurred_at.strftime("%Y-%m-%d %H:%M")
     head = f"{when}  {label}"
+    if getattr(hit, "repo", ""):
+        head = f"{when}  [{hit.repo}]  {label}"
     if record.evidence != "none":
         head += f"  [{record.evidence}]"
     if record.source == "inferred":
@@ -418,8 +424,8 @@ def file_timeline(
 ) -> None:
     """Timeline for a file, oldest first."""
     configure("WARNING")
-    data_dir, _ = _data_dir(repo)
-    hits = retrieval.timeline(data_dir, path, include_inferred)
+    _data, cfg = _data_dir(repo)
+    hits = retrieval.timeline_across(_sources(cfg), path, include_inferred)
     if not hits:
         _echo(f"No records for {path}.")
         return
@@ -440,8 +446,8 @@ def search(
 ) -> None:
     """Keyword search across records, including their anchors."""
     configure("WARNING")
-    data_dir, _ = _data_dir(repo)
-    hits = retrieval.search(data_dir, query, include_inferred, limit)
+    _data, cfg = _data_dir(repo)
+    hits = retrieval.search_across(_sources(cfg), query, include_inferred, limit)
     if not hits:
         _echo(f"No records matching {query!r}.")
         return
@@ -533,11 +539,23 @@ def status(repo: Optional[Path] = typer.Option(None, "--repo")) -> None:  # noqa
 @app.command()
 def init(
     repo: Optional[Path] = typer.Option(None, "--repo", help="Repo root. Defaults to cwd."),  # noqa: UP045
+    with_repo: list[Path] = typer.Option(  # noqa: B006,UP006
+        None, "--with", help="A sibling repo to read alongside this one. Repeatable."
+    ),
 ) -> None:
     """Install hooks and create .agentlog/. The one command you run to start."""
     configure("INFO")
     root = git.repo_root(repo or Path.cwd()) or (repo or Path.cwd()).resolve()
     result = install.install(root)
+
+    cfg = config_module.load(root)
+    linked = []
+    for other in with_repo or []:
+        cfg, changed = workspace.link(cfg, other)
+        if changed:
+            linked.append(other)
+    if linked:
+        workspace.save(cfg)
 
     _echo(f"repo       {root}")
     _echo(f"python     {result['python']}")
@@ -547,6 +565,12 @@ def init(
     else:
         _echo("hooks      already installed")
     _echo(f"data       {result['data_dir']}  (gitignored)")
+    _echo(
+        f"CLAUDE.md  {'added' if result['claude_md_added'] else 'updated'} — how the agent learns it exists"
+    )
+    members = workspace.members(config_module.load(root))
+    if len(members) > 1:
+        _echo(f"reads with {', '.join(m.name for m in members[1:])}")
     _echo()
     _echo("Capture runs on PreCompact and SessionEnd; injection on SessionStart.")
     _echo("Neither needs an API key — staging and injection are local.")
@@ -593,6 +617,40 @@ def inject(
     block = inject_service.build(data_dir, cfg, budget or cfg.token_budget)
     if block:
         _echo(block)
+
+
+@app.command()
+def drain(
+    repo: Optional[Path] = typer.Option(None, "--repo"),  # noqa: UP045
+    results: Optional[Path] = typer.Option(  # noqa: UP045
+        None, "--results", help="Directory of <hash>.json files produced elsewhere."
+    ),
+    limit: int = typer.Option(0, "--limit", help="Drain at most N queued units."),
+) -> None:
+    """Turn the queue into records.
+
+    With --results, ingests JSON extracted by a session running on your plan.
+    Without it, calls the model directly and needs ANTHROPIC_API_KEY.
+    """
+    configure("INFO")
+    data_dir, cfg = _data_dir(repo)
+    queued = pipeline.pending(cfg)
+    if not queued:
+        _echo("Nothing queued.")
+        return
+
+    if results is not None:
+        result = pipeline.drain(cfg, results_dir=results, limit=limit)
+    else:
+        from agentlog.external.anthropic import AnthropicClient
+
+        result = pipeline.drain(cfg, client=AnthropicClient(model=cfg.model), limit=limit)
+
+    _echo(f"drained  {result.segments_new} of {len(queued)} queued")
+    _echo(f"records  {len(result.records)}  ({result.dead_ends} dead ends)")
+    if result.dropped:
+        _echo(f"dropped  {result.dropped}")
+    _echo(f"log      {data_dir / 'records.jsonl'}")
 
 
 def main() -> None:  # pragma: no cover - console entry point

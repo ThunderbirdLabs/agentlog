@@ -150,6 +150,53 @@ def merge_settings(existing: dict, repo: Path) -> tuple[dict, list[str]]:
     return settings, changed
 
 
+_CLAUDE_MD_BEGIN = "<!-- agentlog:begin -->"
+_CLAUDE_MD_END = "<!-- agentlog:end -->"
+
+_CLAUDE_MD_BLOCK = """{begin}
+## Prior work on this repo (agentlog)
+
+Earlier sessions in this repo have been indexed. Relevant records are injected
+at session start, but you can query the rest yourself:
+
+```
+agentlog file <path>          what happened to a file, oldest first
+agentlog setting <key>        every session that turned a config key,
+                              including the name it had before a rename
+agentlog search "<query>"     keyword search across records and anchors
+```
+
+Reach for these before re-running an experiment on unfamiliar code — especially
+when something used to work and now doesn't, or when you are about to change a
+configuration value. A record marked `attempt/failed` is an approach that did
+not work here before; treat it as evidence, not as a prohibition, since the code
+may have moved on since.
+{end}
+"""
+
+
+def write_claude_md(repo: Path) -> bool:
+    """Tell the agent the tool exists.
+
+    Without this the CLI is installed and never used: nothing in a session
+    suggests querying it. Delimited so a re-run replaces only our block and
+    leaves the rest of the file alone.
+    """
+    path = repo / "CLAUDE.md"
+    block = _CLAUDE_MD_BLOCK.format(begin=_CLAUDE_MD_BEGIN, end=_CLAUDE_MD_END)
+    if path.is_file():
+        text = path.read_text(encoding="utf-8")
+        if _CLAUDE_MD_BEGIN in text and _CLAUDE_MD_END in text:
+            head, _, rest = text.partition(_CLAUDE_MD_BEGIN)
+            _, _, tail = rest.partition(_CLAUDE_MD_END)
+            path.write_text(head + block + tail, encoding="utf-8")
+            return False
+        path.write_text(text.rstrip("\n") + "\n\n" + block, encoding="utf-8")
+        return True
+    path.write_text(block, encoding="utf-8")
+    return True
+
+
 def install(repo: Path, python: str | None = None) -> dict:
     """Install hooks and create `.agentlog/`. Returns what changed."""
     from agentlog.domains.store import log as log_module
@@ -173,8 +220,11 @@ def install(repo: Path, python: str | None = None) -> dict:
     settings_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
 
     data_dir = log_module.ensure_dir(repo / ".agentlog")
+    claude_md_added = write_claude_md(repo)
 
     return {
+        "claude_md": str(repo / "CLAUDE.md"),
+        "claude_md_added": claude_md_added,
         "python": python,
         "scripts": [str(p) for p in scripts],
         "settings": str(settings_path),

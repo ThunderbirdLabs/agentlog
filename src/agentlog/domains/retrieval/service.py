@@ -44,6 +44,8 @@ class Hit:
     record: Record
     score: float
     matched: tuple[str, ...]
+    # Which repo's log this came from. Empty when only one is in play.
+    repo: str = ""
 
 
 def _load(data_dir: Path) -> tuple[dict[str, Record], set[str]]:
@@ -156,3 +158,46 @@ def get(data_dir: Path, record_id: str) -> Record | None:
         if record.id == record_id or record.id.endswith(record_id):
             return record
     return None
+
+
+# --------------------------------------------------------------------------
+# across several repos
+# --------------------------------------------------------------------------
+
+
+def _tag(hits: list[Hit], repo: str, multi: bool) -> list[Hit]:
+    if not multi:
+        return hits
+    return [Hit(record=h.record, score=h.score, matched=h.matched, repo=repo) for h in hits]
+
+
+def timeline_across(sources, path: str, include_inferred: bool = False) -> list[Hit]:  # noqa: ANN001
+    """A file timeline across every linked repo.
+
+    The same relative path can exist in two repos and mean different things, so
+    each hit keeps the repo it came from rather than being merged blindly.
+    """
+    multi = len(sources) > 1
+    hits: list[Hit] = []
+    for name, data_dir in sources:
+        hits.extend(_tag(timeline(data_dir, path, include_inferred), name, multi))
+    return sorted(hits, key=lambda h: h.record.occurred_at)
+
+
+def search_across(
+    sources, query: str, include_inferred: bool = False, limit: int = 50
+) -> list[Hit]:  # noqa: ANN001
+    multi = len(sources) > 1
+    hits: list[Hit] = []
+    for name, data_dir in sources:
+        hits.extend(_tag(search(data_dir, query, include_inferred, limit), name, multi))
+    hits.sort(key=lambda h: (-h.score, -h.record.occurred_at.timestamp()))
+    return hits[:limit]
+
+
+def by_anchor_across(sources, kind: str, value: str, include_inferred: bool = False) -> list[Hit]:  # noqa: ANN001
+    multi = len(sources) > 1
+    hits: list[Hit] = []
+    for name, data_dir in sources:
+        hits.extend(_tag(by_anchor(data_dir, kind, value, include_inferred), name, multi))
+    return sorted(hits, key=lambda h: h.record.occurred_at)
