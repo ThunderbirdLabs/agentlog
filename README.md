@@ -60,13 +60,23 @@ Tests never hit the network: extraction is always given a fake client, and ancho
 
 ## Prior art
 
-**[projectmem](https://arxiv.org/abs/2606.12329)** (Malo & Qiu, MIT) is the closest system to this one, and worth reading before this one: event-sourced plain text, a pre-action warning gate, MCP-native. It captures from git hooks and manual entry.
+This is a crowded space. Several tools already do most of what agentlog does, and two do large parts of it better-established. Read this section before deciding agentlog is worth using.
 
-agentlog differs in three ways: capture is transcript-first rather than git-first, so it sees attempts that were never committed; retrieval is keyed to computed anchors (file, route, symbol, issue) rather than free-text memory; and capture is timed to the compaction boundary, the moment a long session loses its own history.
+**[projectmem](https://github.com/riponcm/projectmem)** ([paper](https://arxiv.org/abs/2606.12329), Malo & Qiu) is the closest in intent: local-first, append-only plain text, MCP-native, and explicitly built to warn an agent before it repeats an approach that already failed. It is further along than this and has a published evaluation. The difference is where records come from — projectmem is logged deliberately, by the agent calling `record_attempt()` or a human running `pjm attempt`. agentlog reads the transcript instead, which trades projectmem's precision for coverage of the attempts nobody thought to log.
 
-Also relevant: **Codified Context** ([arXiv:2602.20478](https://arxiv.org/abs/2602.20478)) on plain-text conventions with keyword-retrieved specs, **ESAA** ([arXiv:2602.23193](https://arxiv.org/abs/2602.23193)) on event sourcing for SE agents, and **Reflexion** ([arXiv:2303.11366](https://arxiv.org/abs/2303.11366)) on verbal feedback from failed trials within a task.
+**[claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler)** already does transcript-first capture on the same hooks, at the same moment — session end and pre-compaction — and extracts with the Claude Agent SDK, which means it runs on a Claude subscription with no API key. If you want this category of tool today, start there. It organises what it finds into LLM-written concept articles rather than keying it to anything computed.
 
-Convergent design is normal in this space. Being straight about it reads better than claiming novelty that doesn't hold.
+**[claude-memory-extractor](https://github.com/obra/claude-memory-extractor)** also reads `~/.claude/projects` JSONL directly, chunks long sessions, and extracts lessons with model-generated tags. Also in the space: [claude_memory](https://github.com/codenamev/claude_memory) (hooks + MCP + SQLite), [claude-remember](https://github.com/Digital-Process-Tools/claude-remember), and [code-session-memory](https://github.com/djannot/code-session-memory).
+
+So transcript-first capture is not novel, and neither is compaction-boundary timing. What is actually different here, as far as their public documentation shows:
+
+- **The model never produces a key.** Anchors — files, routes, symbols, config settings, branch, issue — are computed from git and from parsing source. Every other tool above either has the model generate tags and organisation, or keys on file paths and full text. A model that invents keys calls one feature three names across three sessions and the timeline fragments.
+- **Configuration keys are anchors, and both sides of a rename are kept.** When work is against a library or an SDK the knob is the unit of work, and the name you search six weeks later is the one that was in use when it last worked — which only exists on the removed side of a diff. Nothing else found does this.
+- **Secrets are scrubbed before the network, enforced by the type system.** None of the tools above mention redaction at all, and all of them ship transcript text to a model. Transcripts contain pasted `.env` files.
+
+Everything else — local-first, append-only plain text, no telemetry, hook-driven capture, running on a subscription — is convergent, and was arrived at independently rather than first.
+
+Also relevant: **Codified Context** ([arXiv:2602.20478](https://arxiv.org/abs/2602.20478)), **ESAA** ([arXiv:2602.23193](https://arxiv.org/abs/2602.23193)) on event sourcing for SE agents, and **Reflexion** ([arXiv:2303.11366](https://arxiv.org/abs/2303.11366)) on verbal feedback from failed trials within a task.
 
 ## License
 
