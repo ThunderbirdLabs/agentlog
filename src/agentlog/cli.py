@@ -19,13 +19,14 @@ from typing import Optional
 
 import typer
 
-from agentlog import pipeline
+from agentlog import install, pipeline
 from agentlog.core import config as config_module
 from agentlog.core.errors import AgentlogError
 from agentlog.core.logging import configure, get_logger
 from agentlog.domains.anchors import git
 from agentlog.domains.anchors import service as anchors_service
 from agentlog.domains.extraction import service as extraction_service
+from agentlog.domains.inject import service as inject_service
 from agentlog.domains.retrieval import service as retrieval
 from agentlog.domains.store import dedupe
 from agentlog.domains.store import index as index_module
@@ -527,6 +528,71 @@ def status(repo: Optional[Path] = typer.Option(None, "--repo")) -> None:  # noqa
             label = r.kind + (f"/{r.outcome}" if r.outcome else "")
             kinds[label] = kinds.get(label, 0) + 1
         _echo("kinds           " + ", ".join(f"{k}={v}" for k, v in sorted(kinds.items())))
+
+
+@app.command()
+def init(
+    repo: Optional[Path] = typer.Option(None, "--repo", help="Repo root. Defaults to cwd."),  # noqa: UP045
+) -> None:
+    """Install hooks and create .agentlog/. The one command you run to start."""
+    configure("INFO")
+    root = git.repo_root(repo or Path.cwd()) or (repo or Path.cwd()).resolve()
+    result = install.install(root)
+
+    _echo(f"repo       {root}")
+    _echo(f"python     {result['python']}")
+    _echo(f"settings   {result['settings']}")
+    if result["hooks_changed"]:
+        _echo(f"hooks      {', '.join(result['hooks_changed'])}")
+    else:
+        _echo("hooks      already installed")
+    _echo(f"data       {result['data_dir']}  (gitignored)")
+    _echo()
+    _echo("Capture runs on PreCompact and SessionEnd; injection on SessionStart.")
+    _echo("Neither needs an API key — staging and injection are local.")
+    _echo()
+    _echo(f"Next:  agentlog backfill --days 30 --repo {root}")
+
+
+@app.command()
+def stage(
+    repo: Optional[Path] = typer.Option(None, "--repo"),  # noqa: UP045
+    days: int = typer.Option(2, "--days", help="How far back to look for new work."),
+) -> None:
+    """Queue new work units for extraction. Local only — no model, no key.
+
+    This is what the capture hooks run. It parses, segments, resolves anchors
+    and scrubs, then writes the scrubbed payload to a pending queue. It cannot
+    fail on a missing key or a network problem, which is the point: a hook that
+    can fail is a hook that eventually breaks someone's session.
+    """
+    configure("WARNING")
+    data_dir, cfg = _data_dir(repo)
+    root = cfg.repo_root
+    paths = [p for p in reader.recent_sessions(days) if pipeline.belongs_to(p, root)]
+    if not paths:
+        return
+    queued = pipeline.stage(paths, cfg, repo_override=root)
+    if queued:
+        _echo(f"queued {queued} work units for extraction")
+
+
+@app.command()
+def inject(
+    repo: Optional[Path] = typer.Option(None, "--repo"),  # noqa: UP045
+    budget: int = typer.Option(0, "--budget", help="Token budget (0 = config default)."),
+) -> None:
+    """Print the context block for a starting session. Local only.
+
+    Fenced and labelled as a record of prior work, never as instructions. A
+    malicious `.agentlog/` in a cloned repo is a prompt-injection vector, so
+    the block has to read as data being reported.
+    """
+    configure("WARNING")
+    data_dir, cfg = _data_dir(repo)
+    block = inject_service.build(data_dir, cfg, budget or cfg.token_budget)
+    if block:
+        _echo(block)
 
 
 def main() -> None:  # pragma: no cover - console entry point
