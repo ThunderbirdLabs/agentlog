@@ -12,23 +12,75 @@ Git has one commit. Both failures are gone, because broken versions don't get co
 
 The transcript had all three attempts. This tool reads it.
 
-## Status: v0.1
+## Status
 
-v0.1 is the read-only half of the pipeline. It writes nothing, anywhere.
+Working end to end: capture, anchors, redaction, store, retrieval, hooks, and
+install. Verified against real sessions — 38 records extracted from a month of
+work on a photogrammetry worker, including the failed memory-limit experiments
+and the calibration setting that had been dropped between two versions.
 
-```
-reader → parser → segmenter → anchors → redaction → extraction
-```
+Not done: per-turn injection (`UserPromptSubmit`), staleness tagging, and a
+reader for anything other than Claude Code. Extraction quality is the weakest
+part — it currently produces more decisions and notes than dead ends, which is
+backwards from the intent, and it still names files the anchors already cover.
+
+## Quickstart
+
+Two ways in. Both end in the same place.
+
+### Type three commands
 
 ```bash
-agentlog capture ~/.claude/projects/<project>/<session>.jsonl --stage turns
-agentlog capture ... --stage segments   # work units, by overlapping file sets
-agentlog capture ... --stage anchors    # files, routes, symbols, branch, issue
-agentlog capture ... --stage payload    # the exact scrubbed text that would be sent — free
-agentlog capture ... --stage extract    # one model call per segment (needs ANTHROPIC_API_KEY)
+uv tool install git+https://github.com/OWNER/agentlog     # or: pipx install git+...
+cd your-repo
+agentlog init                                             # --with ../sibling-repo if work spans two
+agentlog backfill --days 30                               # dry run: what's there, what it would cost
 ```
 
-Persistence (`.agentlog/records.jsonl` + a derived SQLite index), retrieval, and the hooks that close the loop are v0.2 and v0.3.
+Then start a **new** Claude Code session — hooks are read at session start, so
+the one you are in now will not have them.
+
+### Or hand this to your agent
+
+```
+Set up agentlog in this repository.
+
+1. Install the CLI with `uv tool install git+https://github.com/OWNER/agentlog`.
+   If uv is not available, use pipx. Do not pip install into the project venv.
+2. Run `agentlog init` from the repo root. If this project's work regularly
+   spans a sibling repo — a frontend, a worker, an infra repo — pass
+   `--with <path-to-sibling>`, then run init in that repo too with `--with`
+   pointing back here.
+3. Run `agentlog backfill --days 30`. This is a dry run: it reports how many
+   past sessions it found and what extracting them would cost.
+4. Tell me what it found and stop there.
+
+Do not drain the queue or pass --write without asking me first — that step
+spends money or plan tokens.
+```
+
+The last line matters. Everything up to it is free and local; the extraction
+step is the only part that costs anything, and an agent should not decide that
+on your behalf.
+
+### After setup
+
+Capture runs on its own from then on. To turn queued work into records:
+
+```bash
+agentlog drain            # needs ANTHROPIC_API_KEY, ~half a cent per work unit
+```
+
+or run `/agentlog-drain` inside a Claude Code session, which does the same
+extraction on your existing plan with no key at all.
+
+Then:
+
+```bash
+agentlog file src/worker/pipeline.py    # what happened to this file, oldest first
+agentlog setting image_scale            # every session that turned this knob
+agentlog search "densification crash"
+```
 
 ## How it works
 
