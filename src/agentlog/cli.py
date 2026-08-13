@@ -1,8 +1,13 @@
 """Command line interface.
 
-v0.1 writes nothing, anywhere. `capture` reads a transcript and prints what it
-found at the stage you ask for. There is no `--write` flag yet, because there
-is no log to write to — a flag that errors would be worse than its absence.
+`capture` inspects one transcript and prints what it found at whichever stage
+you ask for; it never writes. `backfill` is the one-time step after install —
+it reads what is already on disk so the log is useful immediately, and it is a
+dry run unless you pass `--write`. Everything else reads the store back out.
+
+The entry-point block lives at the very bottom of this file on purpose: under
+`python -m agentlog.cli` it executes the moment the interpreter reaches it, so
+any command defined below it would never register.
 """
 
 from __future__ import annotations
@@ -14,13 +19,18 @@ from typing import Optional
 
 import typer
 
+from agentlog import pipeline
 from agentlog.core import config as config_module
 from agentlog.core.errors import AgentlogError
 from agentlog.core.logging import configure, get_logger
 from agentlog.domains.anchors import git
 from agentlog.domains.anchors import service as anchors_service
 from agentlog.domains.extraction import service as extraction_service
-from agentlog.domains.transcript import parser, segmenter
+from agentlog.domains.retrieval import service as retrieval
+from agentlog.domains.store import dedupe
+from agentlog.domains.store import index as index_module
+from agentlog.domains.store import log as log_module
+from agentlog.domains.transcript import parser, reader, segmenter
 from agentlog.domains.transcript.schemas import Segment, Transcript
 
 log = get_logger("cli")
@@ -296,6 +306,227 @@ def _emit_extraction(transcript: Transcript, resolved: list[tuple], cfg, as_json
             keys.append(f"issue:{anchors.issue}")
         _echo(f"    keyed to: {', '.join(keys) or '-'}")
         _echo()
+
+
+# --------------------------------------------------------------------------
+# v0.2 — the store, and reading it back
+# --------------------------------------------------------------------------
+
+
+def _data_dir(repo: Optional[Path]) -> tuple[Path, "config_module.Config"]:  # noqa: UP037,UP045
+    root = git.repo_root(repo or Path.cwd()) or (repo or Path.cwd())
+    cfg = config_module.load(root)
+    return cfg.data_dir, cfg
+
+
+def _format_hit(hit, show_id: bool = True) -> list[str]:  # noqa: ANN001
+    record = hit.record
+    label = record.kind + (f"/{record.outcome}" if record.outcome else "")
+    when = record.occurred_at.strftime("%Y-%m-%d %H:%M")
+    head = f"{when}  {label}"
+    if record.evidence != "none":
+        head += f"  [{record.evidence}]"
+    if record.source == "inferred":
+        head += "  (inferred)"
+    if show_id:
+        head += f"  {record.id}"
+    lines = [head, f"    {record.summary}"]
+    if record.detail:
+        lines.append(f"    {record.detail}")
+    a = record.anchors
+    keys = []
+    if a.settings:
+        keys += [f"setting:{s}" for s in a.settings[:4]]
+    if a.routes:
+        keys += [f"route:{r}" for r in a.routes[:2]]
+    if a.symbols:
+        keys += [f"symbol:{s}" for s in a.symbols[:3]]
+    if a.issue:
+        keys.append(f"issue:{a.issue}")
+    if a.head_sha:
+        keys.append(f"at:{a.head_sha}")
+    if keys:
+        lines.append(f"    {'  '.join(keys)}")
+    return lines
+
+
+@app.command()
+def backfill(
+    days: int = typer.Option(30, "--days", help="How far back to read transcripts."),
+    repo: Optional[Path] = typer.Option(None, "--repo", help="Repo root."),  # noqa: UP045
+    write: bool = typer.Option(False, "--write", help="Actually extract and write records."),
+    yes: bool = typer.Option(False, "--yes", help="Skip the cost confirmation."),
+    max_cost: float = typer.Option(2.0, "--max-cost", help="Confirm above this estimate (USD)."),
+    log_level: str = typer.Option("INFO", "--log-level"),
+) -> None:
+    """Process existing transcripts. Dry-run by default; --write to persist.
+
+    This is the one-time step after install. It reads what is already on disk,
+    so the log is useful immediately rather than only for work done from now on.
+    """
+    configure(log_level)
+    data_dir, cfg = _data_dir(repo)
+    root = cfg.repo_root
+    found = reader.recent_sessions(days)
+    paths = [p for p in found if pipeline.belongs_to(p, root)]
+    if not found:
+        _echo(f"No transcripts in the last {days} days.")
+        return
+    if not paths:
+        _echo(f"None of the {len(found)} transcripts in the last {days} days ran in {root}.")
+        return
+
+    dry = pipeline.process(paths, cfg, client=None, repo_override=root)
+    _echo(f"repo              {root}")
+    _echo(f"transcripts       {dry.transcripts} of {len(found)} in the window ran here")
+    _echo(f"segments          {dry.segments_total} ({dry.segments_new} not yet processed)")
+    _echo(f"estimated cost    ${dry.estimated_cost_usd:.2f}")
+    if dry.unreadable:
+        _echo(f"unreadable        {len(dry.unreadable)}")
+
+    if not write:
+        _echo()
+        _echo("Dry run. Re-run with --write to extract and store.")
+        return
+    if dry.segments_new == 0:
+        _echo()
+        _echo("Nothing new to process.")
+        return
+
+    if not yes and dry.estimated_cost_usd > max_cost:
+        confirm = typer.confirm(f"This will spend roughly ${dry.estimated_cost_usd:.2f}. Continue?")
+        if not confirm:
+            _echo("Aborted.")
+            raise typer.Exit(1)
+
+    from agentlog.external.anthropic import AnthropicClient
+
+    client = AnthropicClient(model=cfg.model)
+    result = pipeline.process(paths, cfg, client=client, repo_override=root, write=True)
+    _echo()
+    _echo(f"records written   {len(result.records)}  ({result.dead_ends} dead ends)")
+    _echo(f"segments dropped  {result.dropped}")
+    _echo(f"log               {data_dir / 'records.jsonl'}")
+
+
+@app.command(name="file")
+def file_timeline(
+    path: str = typer.Argument(..., help="Repo-relative path."),
+    repo: Optional[Path] = typer.Option(None, "--repo"),  # noqa: UP045
+    include_inferred: bool = typer.Option(False, "--inferred", help="Include inferred records."),
+) -> None:
+    """Timeline for a file, oldest first."""
+    configure("WARNING")
+    data_dir, _ = _data_dir(repo)
+    hits = retrieval.timeline(data_dir, path, include_inferred)
+    if not hits:
+        _echo(f"No records for {path}.")
+        return
+    _echo(f"{path} — {len(hits)} records")
+    _echo()
+    for hit in hits:
+        for line in _format_hit(hit):
+            _echo(line)
+        _echo()
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Keyword query (FTS5 syntax)."),
+    repo: Optional[Path] = typer.Option(None, "--repo"),  # noqa: UP045
+    include_inferred: bool = typer.Option(False, "--inferred"),
+    limit: int = typer.Option(20, "--limit"),
+) -> None:
+    """Keyword search across records, including their anchors."""
+    configure("WARNING")
+    data_dir, _ = _data_dir(repo)
+    hits = retrieval.search(data_dir, query, include_inferred, limit)
+    if not hits:
+        _echo(f"No records matching {query!r}.")
+        return
+    for hit in hits[:limit]:
+        for line in _format_hit(hit):
+            _echo(line)
+        _echo()
+
+
+@app.command()
+def setting(
+    key: str = typer.Argument(..., help="Configuration key, e.g. fill_occlusion_holes."),
+    repo: Optional[Path] = typer.Option(None, "--repo"),  # noqa: UP045
+    include_inferred: bool = typer.Option(False, "--inferred"),
+) -> None:
+    """Everything that ever touched a configuration key, oldest first.
+
+    Including the sessions where it was renamed away — the old name lives on
+    the removed side of the diff, which is exactly what you reach for when
+    something worked two months ago and does not work now.
+    """
+    configure("WARNING")
+    data_dir, _ = _data_dir(repo)
+    hits = sorted(
+        retrieval.by_anchor(data_dir, "setting", key, include_inferred),
+        key=lambda h: h.record.created_at,
+    )
+    if not hits:
+        _echo(f"No records for setting {key!r}.")
+        return
+    _echo(f"setting:{key} — {len(hits)} records")
+    _echo()
+    for hit in hits:
+        for line in _format_hit(hit):
+            _echo(line)
+        _echo()
+
+
+@app.command()
+def show(
+    record_id: str = typer.Argument(..., help="Record id, or a unique suffix of one."),
+    repo: Optional[Path] = typer.Option(None, "--repo"),  # noqa: UP045
+) -> None:
+    """One record in full, as stored."""
+    configure("WARNING")
+    data_dir, _ = _data_dir(repo)
+    record = retrieval.get(data_dir, record_id)
+    if record is None:
+        _echo(f"No record {record_id!r}.")
+        raise typer.Exit(1)
+    _echo(json.dumps(json.loads(record.model_dump_json()), indent=2))
+
+
+@app.command()
+def reindex(repo: Optional[Path] = typer.Option(None, "--repo")) -> None:  # noqa: UP045
+    """Rebuild the index from the log. Always safe — the log is the truth."""
+    configure("INFO")
+    data_dir, _ = _data_dir(repo)
+    written = index_module.rebuild(data_dir)
+    _echo(f"reindexed {written} records from {data_dir / 'records.jsonl'}")
+
+
+@app.command()
+def status(repo: Optional[Path] = typer.Option(None, "--repo")) -> None:  # noqa: UP045
+    """Counts, cursors, and where everything lives."""
+    configure("WARNING")
+    data_dir, cfg = _data_dir(repo)
+    records = list(log_module.read_all(data_dir))
+    cursors = dedupe.Cursors.load(data_dir)
+    dead_ends = sum(1 for r in records if r.is_dead_end)
+    inferred = sum(1 for r in records if r.source == "inferred")
+
+    _echo(f"repo            {cfg.repo_root}")
+    _echo(f"data            {data_dir}")
+    _echo(f"records         {len(records)}  ({dead_ends} dead ends, {inferred} inferred)")
+    _echo(f"sessions seen   {len(cursors.sessions)}")
+    _echo(f"model           {cfg.model}")
+    if records:
+        first = min(r.occurred_at for r in records)
+        last = max(r.occurred_at for r in records)
+        _echo(f"span            {first:%Y-%m-%d} to {last:%Y-%m-%d}")
+        kinds: dict[str, int] = {}
+        for r in records:
+            label = r.kind + (f"/{r.outcome}" if r.outcome else "")
+            kinds[label] = kinds.get(label, 0) + 1
+        _echo("kinds           " + ", ".join(f"{k}={v}" for k, v in sorted(kinds.items())))
 
 
 def main() -> None:  # pragma: no cover - console entry point
