@@ -565,8 +565,8 @@ def init(
     else:
         _echo("hooks      already installed")
     _echo(f"data       {result['data_dir']}  (gitignored)")
-    _echo(
-        f"CLAUDE.md  {'added' if result['claude_md_added'] else 'updated'} — how the agent learns it exists"
+    _echo(f\"skill      {result['skill']}\")
+    _echo(f\"CLAUDE.md  {'added' if result['claude_md_added'] else 'updated'} — how the agent learns it exists"
     )
     members = workspace.members(config_module.load(root))
     if len(members) > 1:

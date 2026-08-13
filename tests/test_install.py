@@ -104,3 +104,15 @@ def test_claude_md_block_is_added_and_replaced(git_repo: Path) -> None:
     again = (git_repo / "CLAUDE.md").read_text(encoding="utf-8")
     assert again.count(install._CLAUDE_MD_BEGIN) == 1, "a re-run must not duplicate the block"
     assert "Existing notes." in again
+
+
+def test_the_drain_skill_is_installed(git_repo: Path) -> None:
+    """Extraction needs a model; the skill is the path that needs no API key."""
+    result = install.install(git_repo)
+    path = Path(result["skill"])
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---"), "a skill needs frontmatter to be discoverable"
+    assert "name: agentlog-drain" in text
+    assert "agentlog drain --repo" in text, "it must say how to ingest the results"
+    assert "batches" in text, "draining hundreds in one turn exhausts context"
