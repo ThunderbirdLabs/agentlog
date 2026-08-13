@@ -115,7 +115,7 @@ def _session(path: Path, session_id: str, cwd: Path, start: datetime, turns: lis
 @pytest.fixture()
 def history(tmp_path: Path) -> tuple[Path, list[Path]]:
     """A repo whose splitter worked in June and broke after a July rename."""
-    repo = tmp_path / "flycre-worker"
+    repo = tmp_path / "survey-worker"
     (repo / "worker").mkdir(parents=True)
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True, capture_output=True)
     _git(repo, "config", "user.email", "test@example.invalid")

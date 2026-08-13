@@ -45,7 +45,7 @@ SECRETS = [
         "SflKxwRJSMeKKF2QT4fwpM",
     ),
     # PII
-    ("email thomas.fou@forcebase.example.com about the invoice", "thomas.fou@"),
+    ("email dana.reyes@example.com about the invoice", "dana.reyes@"),
     ("call me at (415) 555-0198 when the deploy lands", "555-0198"),
     ("reach ops on +1 415-555-0142", "555-0142"),
 ]

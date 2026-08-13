@@ -322,11 +322,11 @@ def test_json_and_yaml_keys() -> None:
 
 
 def test_screaming_case_env_keys() -> None:
-    assert "PIX4D_LICENSE_PATH" in settings.extract(".env", [("+", "PIX4D_LICENSE_PATH=/opt/x")])
+    assert "SDK_LICENSE_PATH" in settings.extract(".env", [("+", "SDK_LICENSE_PATH=/opt/x")])
 
 
 def test_cli_flags_are_settings() -> None:
-    found = settings.extract("run.sh", [("+", "pix4d --image-scale 0.5 --fast-mode")])
+    found = settings.extract("run.sh", [("+", "surveycli --image-scale 0.5 --fast-mode")])
     assert "image_scale" in found
     assert "fast_mode" in found
 
