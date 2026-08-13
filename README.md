@@ -31,7 +31,7 @@ Two ways in. Both end in the same place.
 ### Type three commands
 
 ```bash
-uv tool install git+https://github.com/OWNER/agentlog     # or: pipx install git+...
+uv tool install git+https://github.com/ThunderbirdLabs/agentlog     # or: pipx install git+...
 cd your-repo
 agentlog init                                             # --with ../sibling-repo if work spans two
 agentlog backfill --days 30                               # dry run: what's there, what it would cost
@@ -45,7 +45,7 @@ the one you are in now will not have them.
 ```
 Set up agentlog in this repository.
 
-1. Install the CLI with `uv tool install git+https://github.com/OWNER/agentlog`.
+1. Install the CLI with `uv tool install git+https://github.com/ThunderbirdLabs/agentlog`.
    If uv is not available, use pipx. Do not pip install into the project venv.
 2. Run `agentlog init` from the repo root. If this project's work regularly
    spans a sibling repo — a frontend, a worker, an infra repo — pass
