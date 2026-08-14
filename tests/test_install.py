@@ -115,4 +115,7 @@ def test_the_drain_skill_is_installed(git_repo: Path) -> None:
     assert text.startswith("---"), "a skill needs frontmatter to be discoverable"
     assert "name: agentlog-drain" in text
     assert "agentlog drain --repo" in text, "it must say how to ingest the results"
-    assert "batches" in text, "draining hundreds in one turn exhausts context"
+    assert "ten" in text, "draining hundreds in one turn exhausts context"
+    # The rules and schema are not in the payload; the skill has to point at
+    # the file that holds them or whoever drains has only the slice.
+    assert "_INSTRUCTIONS.md" in text

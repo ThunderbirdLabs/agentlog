@@ -176,6 +176,7 @@ def process(
 
 
 PENDING_DIRNAME = "pending"
+INSTRUCTIONS_NAME = "_INSTRUCTIONS.md"
 
 
 def pending_dir(cfg: Config) -> Path:
@@ -195,6 +196,11 @@ def stage(paths: list[Path], cfg: Config, repo_override: Path | None = None) -> 
     """
     queue = pending_dir(cfg)
     queue.mkdir(parents=True, exist_ok=True)
+    # The rules and record schema live in the system prompt, which is identical
+    # for every unit. Written once beside the queue rather than copied into
+    # every payload — but it must be written, or whoever drains the queue has
+    # only the slice and no idea what to produce from it.
+    (queue / INSTRUCTIONS_NAME).write_text(prompts.SYSTEM, encoding="utf-8")
     cursors = dedupe.Cursors.load(cfg.data_dir)
     queued = 0
 
@@ -240,6 +246,10 @@ def pending(cfg: Config) -> list[Path]:
     if not queue.is_dir():
         return []
     return sorted(queue.glob("*.json"))
+
+
+def instructions_path(cfg: Config) -> Path:
+    return pending_dir(cfg) / INSTRUCTIONS_NAME
 
 
 def _record_from_payload(payload: dict, candidate, extractor: str) -> Record:  # noqa: ANN001

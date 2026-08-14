@@ -433,3 +433,22 @@ def test_transcripts_from_another_repo_are_not_folded_in(history, tmp_path: Path
     )
     assert pipeline.belongs_to(paths[0], repo)
     assert not pipeline.belongs_to(foreign, repo)
+
+
+def test_staging_writes_the_instructions_beside_the_queue(history) -> None:
+    """A queued unit is only the slice; the rules live in the system prompt.
+
+    Without this file whoever drains the queue — a skill, a person — has a
+    transcript excerpt and no idea what to produce from it.
+    """
+    from agentlog.domains.extraction import prompts
+
+    repo, paths = history
+    cfg = Config(repo_root=repo)
+    queued = pipeline.stage(paths, cfg, repo_override=repo)
+
+    assert queued > 0
+    instructions = pipeline.instructions_path(cfg)
+    assert instructions.is_file()
+    assert instructions.read_text(encoding="utf-8") == prompts.SYSTEM
+    assert instructions not in pipeline.pending(cfg), "it must not look like a work unit"
