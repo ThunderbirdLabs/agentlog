@@ -19,6 +19,7 @@ from agentlog.domains.anchors import service as anchors_service
 from agentlog.domains.extraction import prompts
 from agentlog.domains.extraction import service as extraction_service
 from agentlog.domains.store import dedupe
+from agentlog.domains.store import index as index_module
 from agentlog.domains.store import log as log_module
 from agentlog.domains.store.schemas import Record
 from agentlog.domains.transcript import parser, segmenter
@@ -352,5 +353,7 @@ def drain(
             result.records.append(_record_from_payload(payload, cleaned, extractor))
         path.unlink(missing_ok=True)
 
-    log_module.append(cfg.data_dir, result.records)
+    if result.records:
+        log_module.append(cfg.data_dir, result.records)
+        index_module.rebuild(cfg.data_dir)
     return result

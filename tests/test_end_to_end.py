@@ -452,3 +452,49 @@ def test_staging_writes_the_instructions_beside_the_queue(history) -> None:
     assert instructions.is_file()
     assert instructions.read_text(encoding="utf-8") == prompts.SYSTEM
     assert instructions not in pipeline.pending(cfg), "it must not look like a work unit"
+
+
+def test_queries_do_not_get_slower_as_history_grows(history) -> None:
+    """Retrieval must be proportional to results, not to how much is stored.
+
+    This runs on a per-turn hook. An O(history) query is half a second added
+    to every prompt once the log is large, which is how a hook gets disabled.
+    """
+    import time
+
+    from agentlog.domains.anchors.schemas import Anchors
+    from agentlog.domains.store.schemas import Record, SegmentRef
+
+    repo, paths = history
+    cfg = Config(repo_root=repo)
+    _run(repo, paths, ScriptedClient())
+
+    def timed() -> float:
+        retrieval.by_anchor(cfg.data_dir, "file", WORKER)
+        start = time.perf_counter()
+        for _ in range(5):
+            retrieval.by_anchor(cfg.data_dir, "file", WORKER)
+        return (time.perf_counter() - start) / 5
+
+    small = timed()
+
+    bulk = [
+        Record(
+            occurred_at=AUGUST,
+            session_id=f"bulk{i}",
+            segment=SegmentRef(start_turn=0, end_turn=1),
+            anchors=Anchors(files=(f"src/other{i}.py",)),
+            kind="note",
+            summary=f"unrelated record {i}",
+            extractor="test/v1",
+        )
+        for i in range(4000)
+    ]
+    log_module.append(cfg.data_dir, bulk)
+    index_module.rebuild(cfg.data_dir)
+
+    large = timed()
+    assert large < small * 6 + 0.05, (
+        f"query cost scaled with history: {small * 1000:.1f}ms -> {large * 1000:.1f}ms "
+        "for the same number of results"
+    )

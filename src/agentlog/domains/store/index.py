@@ -69,6 +69,11 @@ CREATE TABLE IF NOT EXISTS fts_map (
     rowid     INTEGER PRIMARY KEY,
     record_id TEXT NOT NULL UNIQUE
 );
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -164,6 +169,29 @@ def add(conn: sqlite3.Connection, records: Iterable[Record]) -> int:
     return written
 
 
+def _log_fingerprint(data_dir: Path) -> str:
+    """A cheap stand-in for "has the log changed".
+
+    Size and mtime, not a line count. The log is append-only, so size alone is
+    already a strong signal, and reading the whole file to count lines is
+    exactly the O(history) cost this is here to avoid.
+    """
+    path = log_module.log_path(data_dir)
+    try:
+        stat = path.stat()
+    except OSError:
+        return "0:0"
+    return f"{stat.st_size}:{int(stat.st_mtime_ns)}"
+
+
+def _stamp(conn: sqlite3.Connection, data_dir: Path) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('log_fingerprint', ?)",
+        (_log_fingerprint(data_dir),),
+    )
+    conn.commit()
+
+
 def rebuild(data_dir: Path) -> int:
     """Drop the index and rebuild it from the log.
 
@@ -174,17 +202,23 @@ def rebuild(data_dir: Path) -> int:
         path.unlink()
     conn = connect(data_dir)
     try:
-        return add(conn, log_module.read_all(data_dir))
+        written = add(conn, log_module.read_all(data_dir))
+        _stamp(conn, data_dir)
+        return written
     finally:
         conn.close()
 
 
 def ensure_current(data_dir: Path) -> sqlite3.Connection:
-    """Open the index, rebuilding it if it is missing or behind the log."""
+    """Open the index, rebuilding it if it has fallen behind the log.
+
+    The freshness check is a stat call, not a line count. This runs on every
+    query, including a per-turn hook, so it has to be O(1) no matter how long
+    the history gets.
+    """
     conn = connect(data_dir)
-    indexed = conn.execute("SELECT COUNT(*) AS n FROM records").fetchone()["n"]
-    logged = log_module.count(data_dir)
-    if indexed == logged:
+    row = conn.execute("SELECT value FROM meta WHERE key = 'log_fingerprint'").fetchone()
+    if row is not None and row["value"] == _log_fingerprint(data_dir):
         return conn
     conn.close()
     rebuild(data_dir)
