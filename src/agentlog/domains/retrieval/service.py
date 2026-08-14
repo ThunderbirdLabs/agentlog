@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from agentlog.domains.store import index as index_module
@@ -48,10 +49,65 @@ class Hit:
     repo: str = ""
 
 
-def _load(data_dir: Path) -> tuple[dict[str, Record], set[str]]:
-    records = list(log_module.read_all(data_dir))
-    by_id = {record.id: record for record in records}
-    return by_id, log_module.superseded_ids(records)
+def _hydrate(conn: sqlite3.Connection, ids: list[str]) -> dict[str, Record]:
+    """Rebuild records from the index rather than re-reading the log.
+
+    The log is the source of truth, but reading all of it to resolve a handful
+    of ids makes every query cost O(history). Measured: 7ms at a thousand
+    records, 457ms at fifty thousand — and this runs on a per-turn hook, so
+    that is half a second added to every prompt someone types.
+
+    The index carries every field a record has, so hydrating from it is exact,
+    not a summary. A disagreement between the two can only mean a stale index,
+    which `reindex` fixes and `ensure_current` detects.
+    """
+    if not ids:
+        return {}
+    from agentlog.domains.anchors.schemas import Anchors
+    from agentlog.domains.store.schemas import SegmentRef
+
+    marks = ",".join("?" * len(ids))
+    rows = conn.execute(f"SELECT * FROM records WHERE id IN ({marks})", ids).fetchall()
+
+    grouped: dict[str, dict[str, list[str]]] = {}
+    for row in conn.execute(f"SELECT * FROM anchors WHERE record_id IN ({marks})", ids):
+        grouped.setdefault(row["record_id"], {}).setdefault(row["kind"], []).append(row["value"])
+
+    out: dict[str, Record] = {}
+    for row in rows:
+        kinds = grouped.get(row["id"], {})
+        out[row["id"]] = Record(
+            id=row["id"],
+            occurred_at=datetime.fromisoformat(row["occurred_at"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            session_id=row["session_id"],
+            segment=SegmentRef(start_turn=row["start_turn"], end_turn=row["end_turn"]),
+            anchors=Anchors(
+                files=tuple(kinds.get("file", ())),
+                routes=tuple(kinds.get("route", ())),
+                symbols=tuple(kinds.get("symbol", ())),
+                settings=tuple(kinds.get("setting", ())),
+                commits=tuple(kinds.get("commit", ())),
+                branch=row["branch"],
+                issue=row["issue"],
+                head_sha=row["head_sha"],
+            ),
+            kind=row["kind"],
+            outcome=row["outcome"],
+            summary=row["summary"],
+            detail=row["detail"],
+            evidence=row["evidence"],
+            source=row["source"],
+            confidence=row["confidence"],
+            extractor=row["extractor"],
+            supersedes=row["supersedes"],
+        )
+    return out
+
+
+def _superseded(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute("SELECT supersedes FROM records WHERE supersedes IS NOT NULL")
+    return {row["supersedes"] for row in rows}
 
 
 def _recency_bonus(record: Record, newest: float, oldest: float) -> float:
@@ -103,12 +159,13 @@ def by_anchor(
         rows = conn.execute(
             "SELECT record_id FROM anchors WHERE kind = ? AND value = ?", (kind, value)
         ).fetchall()
+        candidates: dict[str, list[str]] = {}
+        for row in rows:
+            candidates.setdefault(row["record_id"], []).append(kind)
+        by_id = _hydrate(conn, list(candidates))
+        superseded = _superseded(conn)
     finally:
         conn.close()
-    by_id, superseded = _load(data_dir)
-    candidates: dict[str, list[str]] = {}
-    for row in rows:
-        candidates.setdefault(row["record_id"], []).append(kind)
     return _rank(candidates, by_id, superseded, include_inferred)
 
 
@@ -145,11 +202,11 @@ def search(
             # A bare FTS5 syntax error (an unbalanced quote, a stray operator)
             # should read as "no results", not as a crash in a hook.
             return []
+        candidates = {row["record_id"]: ["text"] for row in rows}
+        by_id = _hydrate(conn, list(candidates))
+        superseded = _superseded(conn)
     finally:
         conn.close()
-
-    by_id, superseded = _load(data_dir)
-    candidates = {row["record_id"]: ["text"] for row in rows}
     return _rank(candidates, by_id, superseded, include_inferred)
 
 
