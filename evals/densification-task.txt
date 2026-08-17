@@ -1,0 +1,1 @@
+You are working on a photogrammetry worker service. A processing job for a 381-frame mission segfaults during the densification phase. The container currently has a 128 GB memory budget. Propose the three things you would try first, in order, each in one short sentence. Be concrete and decisive.
