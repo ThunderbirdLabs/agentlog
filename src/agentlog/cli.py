@@ -27,6 +27,7 @@ from agentlog.domains.anchors import git
 from agentlog.domains.anchors import service as anchors_service
 from agentlog.domains.extraction import service as extraction_service
 from agentlog.domains.inject import service as inject_service
+from agentlog.domains.retrieval import quality
 from agentlog.domains.retrieval import service as retrieval
 from agentlog.domains.store import dedupe
 from agentlog.domains.store import index as index_module
@@ -653,6 +654,51 @@ def drain(
     if result.dropped:
         _echo(f"dropped  {result.dropped}")
     _echo(f"log      {data_dir / 'records.jsonl'}")
+
+
+@app.command()
+def lint(
+    repo: Optional[Path] = typer.Option(None, "--repo"),  # noqa: UP045
+    show: int = typer.Option(8, "--show", help="Example findings to print per check."),
+) -> None:
+    """Score the log against the shape the design asked for.
+
+    Not a truth check — nothing here can tell whether a record is correct. It
+    measures whether records are dead ends or restated events, and whether they
+    name identifiers the anchors already carry. Use it to tune the prompt.
+    """
+    configure("WARNING")
+    data_dir, _ = _data_dir(repo)
+    records = list(log_module.read_all(data_dir))
+    if not records:
+        _echo("No records yet.")
+        return
+
+    report = quality.check(records)
+    _echo(f"records          {report.total}")
+    _echo(f"clean            {report.clean}  ({report.clean / report.total * 100:.0f}%)")
+    _echo(f"dead ends        {report.dead_ends}  ({report.dead_end_share * 100:.0f}% of records)")
+    _echo()
+    _echo("kinds")
+    for label, n in report.kinds.most_common():
+        _echo(f"  {label:<22} {n:>4}  {n / report.total * 100:>3.0f}%")
+
+    if not report.findings:
+        _echo()
+        _echo("No findings.")
+        return
+
+    _echo()
+    _echo("findings")
+    for name, n in report.by_check.most_common():
+        _echo(f"  {name:<28} {n:>4}")
+    _echo()
+    for name, _n in report.by_check.most_common():
+        examples = [f for f in report.findings if f.check == name][:show]
+        _echo(f"{name}:")
+        for finding in examples:
+            _echo(f"  {finding.record_id[:14]}  {finding.detail[:70]}")
+        _echo()
 
 
 def main() -> None:  # pragma: no cover - console entry point

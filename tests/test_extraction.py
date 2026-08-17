@@ -217,3 +217,15 @@ def test_prompt_requires_naming_settings_exactly() -> None:
     system = prompts.SYSTEM
     assert "Configuration keys, settings, parameters and flags are the exception" in system
     assert "name it had back when it last worked" in system or "it last worked" in system
+
+
+def test_prompt_v4_caps_expected_output_and_demands_evidence() -> None:
+    """Measured on real records: 62% decisions and notes, 11% dead ends.
+
+    The design asks for the opposite ratio, so v4 states the expectation
+    outright rather than hoping bias language carries it.
+    """
+    system = prompts.SYSTEM
+    assert "zero to two records" in system
+    assert "An attempt needs one" in system, "attempts without evidence are guesses"
+    assert "git already keeps" in system, "PR bookkeeping was 3 of 45 records"
