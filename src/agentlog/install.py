@@ -59,8 +59,12 @@ exit 0
 # session it was triggered from.
 _CAPTURE_BODY = """cat > /dev/null 2>&1   # drain the hook payload on stdin
 
+# Set by Claude Code; falls back to walking up from this script so the hook
+# still works when run by hand.
+REPO="${{CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}}"
+
 (
-  "$AGENTLOG_PYTHON" -m agentlog.cli stage --repo "{repo}" >/dev/null 2>&1
+  "$AGENTLOG_PYTHON" -m agentlog.cli stage --repo "$REPO" >/dev/null 2>&1
 ) &
 
 """
@@ -69,7 +73,9 @@ _CAPTURE_BODY = """cat > /dev/null 2>&1   # drain the hook payload on stdin
 # is what lands in the agent's context.
 _INJECT_BODY = """cat > /dev/null 2>&1
 
-"$AGENTLOG_PYTHON" -m agentlog.cli inject --repo "{repo}" 2>/dev/null
+REPO="${{CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}}"
+
+"$AGENTLOG_PYTHON" -m agentlog.cli inject --repo "$REPO" 2>/dev/null
 
 """
 
@@ -82,14 +88,12 @@ def resolve_python() -> str:
     return sys.executable or shutil.which("python3") or "python3"
 
 
-def hook_scripts(repo: Path, python: str) -> dict[str, str]:
+def hook_scripts(repo: Path, python: str) -> dict[str, str]:  # noqa: ARG001
     scripts = {}
     for event in _CAPTURE_EVENTS:
-        scripts[event] = _SCRIPT_TEMPLATE.format(
-            python=python, body=_CAPTURE_BODY.format(repo=repo)
-        )
+        scripts[event] = _SCRIPT_TEMPLATE.format(python=python, body=_CAPTURE_BODY)
     for event in _INJECT_EVENTS:
-        scripts[event] = _SCRIPT_TEMPLATE.format(python=python, body=_INJECT_BODY.format(repo=repo))
+        scripts[event] = _SCRIPT_TEMPLATE.format(python=python, body=_INJECT_BODY)
     return scripts
 
 
@@ -109,7 +113,7 @@ def _entry(command: str) -> dict:
     return {"type": "command", "command": command}
 
 
-def merge_settings(existing: dict, repo: Path) -> tuple[dict, list[str]]:
+def merge_settings(existing: dict, repo: Path) -> tuple[dict, list[str]]:  # noqa: ARG001
     """Add agentlog's hooks to a settings object without disturbing others.
 
     Merged rather than replaced, and idempotent: re-running `init` after an
@@ -120,8 +124,10 @@ def merge_settings(existing: dict, repo: Path) -> tuple[dict, list[str]]:
     changed = []
 
     for event in (*_CAPTURE_EVENTS, *_INJECT_EVENTS):
-        script = repo / ".claude" / HOOKS_DIRNAME / f"agentlog-{event.lower()}.sh"
-        command = str(script)
+        # Relative to the project, not absolute. An absolute path here dies the
+        # moment someone reorganises a directory, and it dies silently: the
+        # hook simply never runs and the log quietly stops growing.
+        command = f'"$CLAUDE_PROJECT_DIR"/.claude/{HOOKS_DIRNAME}/agentlog-{event.lower()}.sh'
         matchers = hooks.setdefault(event, [])
         if not isinstance(matchers, list):
             log.warning("settings.hooks.%s is not a list; leaving it alone", event)
@@ -304,3 +310,90 @@ def install(repo: Path, python: str | None = None) -> dict:
         "hooks_changed": changed,
         "data_dir": str(data_dir),
     }
+
+
+def diagnose(repo: Path) -> list[tuple[str, bool, str]]:
+    """Check that an installation is actually wired up.
+
+    This exists because the failure it looks for is silent. Hooks that point at
+    a path which no longer exists do not error — they simply never run, and the
+    only symptom is a log that stopped growing, which reads exactly like the
+    tool not working.
+    """
+    import json as _json
+    import os
+    import shutil as _shutil
+
+    checks: list[tuple[str, bool, str]] = []
+
+    settings_path = repo / SETTINGS_PATH
+    settings: dict = {}
+    if settings_path.is_file():
+        try:
+            settings = _json.loads(settings_path.read_text(encoding="utf-8"))
+            checks.append(("settings readable", True, str(settings_path)))
+        except _json.JSONDecodeError as exc:
+            checks.append(("settings readable", False, f"{settings_path}: {exc}"))
+    else:
+        checks.append(("settings readable", False, f"missing: {settings_path}"))
+
+    wired = {
+        event: [
+            h.get("command", "")
+            for m in settings.get("hooks", {}).get(event, [])
+            if isinstance(m, dict)
+            for h in m.get("hooks", [])
+            if isinstance(h, dict) and _MARKER in str(h.get("command", ""))
+        ]
+        for event in (*_CAPTURE_EVENTS, *_INJECT_EVENTS)
+    }
+    for event, commands in wired.items():
+        if not commands:
+            checks.append((f"{event} hook registered", False, "not in settings.json"))
+            continue
+        command = commands[0]
+        resolved = command.replace('"$CLAUDE_PROJECT_DIR"', str(repo)).replace(
+            "$CLAUDE_PROJECT_DIR", str(repo)
+        )
+        exists = Path(resolved.strip('"')).is_file()
+        note = command if exists else f"points at a missing file: {resolved}"
+        checks.append((f"{event} hook registered", exists, note))
+        if exists and "$CLAUDE_PROJECT_DIR" not in command:
+            checks.append(
+                (
+                    f"{event} hook survives a move",
+                    False,
+                    "absolute path; re-run `agentlog init` to make it project-relative",
+                )
+            )
+
+    script = repo / ".claude" / HOOKS_DIRNAME / "agentlog-sessionstart.sh"
+    if script.is_file():
+        baked = ""
+        for line in script.read_text(encoding="utf-8").splitlines():
+            if line.startswith("AGENTLOG_PYTHON=") and "command -v" not in line:
+                baked = line.split("=", 1)[1].strip('"')
+                break
+        ok = bool(baked) and os.access(baked, os.X_OK)
+        checks.append(("interpreter valid", ok, baked or "not found in the hook script"))
+
+    checks.append(("git available", _shutil.which("git") is not None, "needed for anchors"))
+    data = repo / ".agentlog"
+    checks.append(("data directory", data.is_dir(), str(data)))
+
+    have_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    have_cli = _shutil.which("claude") is not None
+    checks.append(
+        (
+            "a way to extract",
+            have_key or have_cli,
+            "ANTHROPIC_API_KEY"
+            if have_key
+            else (
+                "claude CLI (--headless)"
+                if have_cli
+                else "neither ANTHROPIC_API_KEY nor the claude CLI — the queue cannot be drained"
+            ),
+        )
+    )
+    return checks

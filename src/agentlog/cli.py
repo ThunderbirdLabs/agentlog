@@ -701,6 +701,39 @@ def lint(
         _echo()
 
 
+@app.command()
+def doctor(
+    repo: Optional[Path] = typer.Option(None, "--repo"),  # noqa: UP045
+) -> None:
+    """Check the installation is actually wired up.
+
+    Worth running after moving a repo. A hook pointing at a path that no longer
+    exists fails silently — nothing errors, the log just stops growing.
+    """
+    configure("WARNING")
+    _data, cfg = _data_dir(repo)
+    root = cfg.repo_root
+    checks = install.diagnose(root)
+
+    _echo(f"repo  {root}")
+    _echo()
+    failed = 0
+    for name, ok, note in checks:
+        mark = "ok  " if ok else "FAIL"
+        if not ok:
+            failed += 1
+        _echo(f"  [{mark}] {name:<28} {note}")
+
+    queued = len(pipeline.pending(cfg))
+    records = log_module.count(cfg.data_dir)
+    _echo()
+    _echo(f"  {records} records, {queued} queued")
+    if failed:
+        _echo()
+        _echo(f"{failed} problem(s). `agentlog init --repo {root}` fixes most of them.")
+        raise typer.Exit(1)
+
+
 def main() -> None:  # pragma: no cover - console entry point
     try:
         app()

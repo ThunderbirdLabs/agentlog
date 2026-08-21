@@ -119,3 +119,64 @@ def test_the_drain_skill_is_installed(git_repo: Path) -> None:
     # The rules and schema are not in the payload; the skill has to point at
     # the file that holds them or whoever drains has only the slice.
     assert "_INSTRUCTIONS.md" in text
+
+
+def test_hook_commands_survive_a_repo_move(git_repo: Path) -> None:
+    """Absolute paths in settings.json die silently when a repo is moved.
+
+    Found the hard way: a directory reorganisation orphaned every hook, nothing
+    errored, and capture stopped for a week while looking like the tool simply
+    did not work.
+    """
+    install.install(git_repo)
+    settings = json.loads((git_repo / install.SETTINGS_PATH).read_text(encoding="utf-8"))
+    for event in ("PreCompact", "SessionEnd", "SessionStart"):
+        command = settings["hooks"][event][0]["hooks"][0]["command"]
+        assert "$CLAUDE_PROJECT_DIR" in command
+        assert str(git_repo) not in command, "no absolute path may be baked in"
+
+
+def test_doctor_catches_an_orphaned_hook(git_repo: Path) -> None:
+    install.install(git_repo)
+    assert all(ok for _n, ok, _d in install.diagnose(git_repo))
+
+    settings_path = git_repo / install.SETTINGS_PATH
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] = "/gone/agentlog-sessionstart.sh"
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+    failures = [name for name, ok, _d in install.diagnose(git_repo) if not ok]
+    assert "SessionStart hook registered" in failures
+
+
+def test_the_log_is_committed_but_derived_files_are_not(git_repo: Path) -> None:
+    """Graphify's split: ship the artifact, ignore the cache."""
+    from agentlog.domains.store import log as log_module
+
+    install.install(git_repo)
+    ignored = (git_repo / ".agentlog" / ".gitignore").read_text(encoding="utf-8")
+    assert "index.db" in ignored and "pending/" in ignored
+    assert "records.jsonl" not in ignored, "the log is the thing worth sharing"
+
+    subprocess.run(["git", "-C", str(git_repo), "add", "-A"], check=True, capture_output=True)
+    tracked = subprocess.run(
+        ["git", "-C", str(git_repo), "ls-files", ".agentlog"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert ".agentlog/.gitignore" in tracked
+    assert "index.db" not in tracked
+
+    log_module.append(git_repo / ".agentlog", [])
+    assert (git_repo / ".agentlog").is_dir()
+
+
+def test_a_users_own_gitignore_is_left_alone(git_repo: Path) -> None:
+    from agentlog.domains.store import log as log_module
+
+    data = git_repo / ".agentlog"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / ".gitignore").write_text("# mine\n*\n", encoding="utf-8")
+    log_module.ensure_dir(data)
+    assert (data / ".gitignore").read_text(encoding="utf-8") == "# mine\n*\n"

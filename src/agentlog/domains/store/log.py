@@ -21,20 +21,38 @@ log = get_logger("store.log")
 LOG_NAME = "records.jsonl"
 GITIGNORE_NAME = ".gitignore"
 
-# `.agentlog/` is ignored by default. The log is designed to be committable —
-# it is plain text and reviewable — but that has to be a decision someone
-# makes, not something a hook does to their repo behind their back.
-_DEFAULT_GITIGNORE = "*\n"
+# The log is committed; everything derived from it is not. It is plain text,
+# one record per line, and diffs cleanly — so a teammate cloning the repo
+# starts with the history instead of an empty file, and a record that looks
+# wrong can be argued with in a pull request.
+#
+# Everything below is rebuildable from the log or specific to one machine.
+_DEFAULT_GITIGNORE = """\
+index.db
+pending/
+sessions/
+cursors.json
+"""
 
 
 def log_path(data_dir: Path) -> Path:
     return data_dir / LOG_NAME
 
 
+# What the first release wrote: ignore everything. Upgraded in place, because
+# an installation that keeps ignoring the log silently never shares it.
+_LEGACY_GITIGNORE = "*\n"
+
+
 def ensure_dir(data_dir: Path) -> Path:
     data_dir.mkdir(parents=True, exist_ok=True)
     gitignore = data_dir / GITIGNORE_NAME
     if not gitignore.exists():
+        gitignore.write_text(_DEFAULT_GITIGNORE, encoding="utf-8")
+        return data_dir
+    # Only replace the exact text we wrote ourselves. Anything else is the
+    # user's, and they may have ignored the log deliberately.
+    if gitignore.read_text(encoding="utf-8") == _LEGACY_GITIGNORE:
         gitignore.write_text(_DEFAULT_GITIGNORE, encoding="utf-8")
     return data_dir
 
