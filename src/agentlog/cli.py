@@ -566,6 +566,8 @@ def init(
     else:
         _echo("hooks      already installed")
     _echo(f"data       {result['data_dir']}  (gitignored)")
+    if result.get("git_hook"):
+        _echo(f"git hook   {result['git_hook']}  (fires on commit, survives moves)")
     _echo(f"skill      {result['skill']}")
     _echo(
         f"CLAUDE.md  {'added' if result['claude_md_added'] else 'updated'}"

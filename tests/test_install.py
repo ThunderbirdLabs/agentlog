@@ -180,3 +180,80 @@ def test_a_users_own_gitignore_is_left_alone(git_repo: Path) -> None:
     (data / ".gitignore").write_text("# mine\n*\n", encoding="utf-8")
     log_module.ensure_dir(data)
     assert (data / ".gitignore").read_text(encoding="utf-8") == "# mine\n*\n"
+
+
+def test_git_post_commit_hook_is_installed(git_repo: Path) -> None:
+    """Graphify's trick: git finds its hooks relative to the repo.
+
+    An editor hook registered by absolute path dies when a directory moves.
+    A git hook does not, and it fires whatever agent or editor is in use.
+    """
+    result = install.install(git_repo)
+    path = Path(result["git_hook"])
+    assert path.is_file()
+    assert path.stat().st_mode & stat.S_IXUSR
+    body = path.read_text(encoding="utf-8")
+    assert "agentlog stage" in body
+    assert str(git_repo) not in body, "no absolute path may be baked in"
+
+
+def test_an_existing_post_commit_hook_survives(git_repo: Path) -> None:
+    hook = git_repo / ".git" / "hooks" / "post-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/bin/sh\necho existing-tool\n", encoding="utf-8")
+
+    install.install(git_repo)
+    body = hook.read_text(encoding="utf-8")
+    assert "echo existing-tool" in body
+    assert "agentlog stage" in body
+
+    install.install(git_repo)
+    assert hook.read_text(encoding="utf-8").count(install._GIT_HOOK_BEGIN) == 1
+
+
+def test_the_git_hook_never_fails_a_commit(git_repo: Path) -> None:
+    """A memory tool must not be able to block someone's commit."""
+    install.install(git_repo)
+    hook = git_repo / ".git" / "hooks" / "post-commit"
+    done = subprocess.run(
+        ["/bin/sh", str(hook)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": "/nonexistent", "HOME": str(git_repo)},
+    )
+    assert done.returncode == 0
+
+
+def test_session_end_stages_and_extracts(git_repo: Path) -> None:
+    """Extraction was the step waiting on an agent choosing to run a skill."""
+    install.install(git_repo)
+    body = (git_repo / ".claude" / "hooks" / "agentlog-sessionend.sh").read_text(encoding="utf-8")
+    assert "stage" in body
+    assert "drain" in body, "storing must not depend on anyone deciding to"
+    assert "--limit" in body, "an unbounded backlog must not become unbounded spend"
+    assert "AGENTLOG_CHILD=1" in body, "the child's own hooks must not re-enter this"
+
+
+def test_hook_scripts_are_valid_shell(git_repo: Path) -> None:
+    """A hook that is syntactically broken still exits 0 and does nothing.
+
+    That has bitten twice: an orphaned path, then a doubled brace producing a
+    bad substitution. Both passed a file-exists check.
+    """
+    install.install(git_repo)
+    for hook in sorted((git_repo / ".claude" / "hooks").glob("agentlog-*.sh")):
+        done = subprocess.run(
+            ["/bin/sh", "-n", str(hook)], capture_output=True, text=True, timeout=30
+        )
+        assert done.returncode == 0, f"{hook.name} is not valid shell: {done.stderr}"
+        body = hook.read_text(encoding="utf-8")
+        assert "${{" not in body, f"{hook.name} emits a literal doubled brace"
+
+
+def test_doctor_catches_a_broken_hook_script(git_repo: Path) -> None:
+    install.install(git_repo)
+    hook = git_repo / ".claude" / "hooks" / "agentlog-sessionstart.sh"
+    hook.write_text('#!/bin/sh\nif [ -z "$X"\nexit 0\n', encoding="utf-8")
+    failures = [name for name, ok, _d in install.diagnose(git_repo) if not ok]
+    assert "SessionStart script valid" in failures

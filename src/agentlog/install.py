@@ -19,6 +19,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from agentlog.core.errors import ConfigError
 from agentlog.core.logging import get_logger
 
 log = get_logger("install")
@@ -57,11 +58,27 @@ exit 0
 
 # Capture is fire-and-forget: detached, output discarded, never blocking the
 # session it was triggered from.
+_SESSION_END_BODY = """cat > /dev/null 2>&1
+
+REPO="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+
+# Stage, then extract. Extraction is the step that was waiting on someone
+# choosing to run a skill, which is why queues grew and logs stayed empty.
+# Backgrounded and capped: a session ending should never wait on this, and a
+# runaway backlog should not turn into an unbounded spend.
+(
+  "$AGENTLOG_PYTHON" -m agentlog.cli stage --repo "$REPO" >/dev/null 2>&1
+  AGENTLOG_CHILD=1 "$AGENTLOG_PYTHON" -m agentlog.cli drain --repo "$REPO" --limit 25 \\
+    >/dev/null 2>&1
+) &
+
+"""
+
 _CAPTURE_BODY = """cat > /dev/null 2>&1   # drain the hook payload on stdin
 
 # Set by Claude Code; falls back to walking up from this script so the hook
 # still works when run by hand.
-REPO="${{CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}}"
+REPO="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
 (
   "$AGENTLOG_PYTHON" -m agentlog.cli stage --repo "$REPO" >/dev/null 2>&1
@@ -73,7 +90,7 @@ REPO="${{CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}}"
 # is what lands in the agent's context.
 _INJECT_BODY = """cat > /dev/null 2>&1
 
-REPO="${{CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}}"
+REPO="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
 "$AGENTLOG_PYTHON" -m agentlog.cli inject --repo "$REPO" 2>/dev/null
 
@@ -91,7 +108,8 @@ def resolve_python() -> str:
 def hook_scripts(repo: Path, python: str) -> dict[str, str]:  # noqa: ARG001
     scripts = {}
     for event in _CAPTURE_EVENTS:
-        scripts[event] = _SCRIPT_TEMPLATE.format(python=python, body=_CAPTURE_BODY)
+        body = _SESSION_END_BODY if event == "SessionEnd" else _CAPTURE_BODY
+        scripts[event] = _SCRIPT_TEMPLATE.format(python=python, body=body)
     for event in _INJECT_EVENTS:
         scripts[event] = _SCRIPT_TEMPLATE.format(python=python, body=_INJECT_BODY)
     return scripts
@@ -107,6 +125,50 @@ def write_hooks(repo: Path, python: str) -> list[Path]:
         path.chmod(0o755)
         written.append(path)
     return written
+
+
+_GIT_HOOK_BEGIN = "# >>> agentlog >>>"
+_GIT_HOOK_END = "# <<< agentlog <<<"
+
+# A commit is a real work boundary, and git finds this hook relative to the
+# repo — so unlike an editor hook registered by absolute path, moving the
+# directory cannot orphan it. It also fires whatever agent or editor you use.
+_GIT_HOOK_BODY = """{begin}
+# Installed by `agentlog init`. Delete this block to disable.
+# Never blocks or fails a commit: backgrounded, output discarded, always true.
+if [ -z "$AGENTLOG_CHILD" ] && command -v agentlog >/dev/null 2>&1; then
+  ( agentlog stage >/dev/null 2>&1 ) &
+fi
+{end}"""
+
+
+def write_git_hook(repo: Path) -> tuple[Path, bool]:
+    """Install a post-commit hook, merging into one that already exists.
+
+    Appended inside delimiters rather than written wholesale: plenty of repos
+    already have a post-commit hook from husky or pre-commit, and silently
+    replacing it would break someone's workflow to install a memory tool.
+    """
+    hooks_dir = repo / ".git" / "hooks"
+    if not hooks_dir.parent.is_dir():
+        raise ConfigError(f"{repo} is not a git repository")
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    path = hooks_dir / "post-commit"
+    block = _GIT_HOOK_BODY.format(begin=_GIT_HOOK_BEGIN, end=_GIT_HOOK_END)
+
+    if path.is_file():
+        text = path.read_text(encoding="utf-8")
+        if _GIT_HOOK_BEGIN in text and _GIT_HOOK_END in text:
+            head, _, rest = text.partition(_GIT_HOOK_BEGIN)
+            _, _, tail = rest.partition(_GIT_HOOK_END)
+            path.write_text(head + block + tail, encoding="utf-8")
+            path.chmod(0o755)
+            return path, False
+        path.write_text(text.rstrip("\n") + "\n\n" + block + "\n", encoding="utf-8")
+    else:
+        path.write_text("#!/bin/sh\n\n" + block + "\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path, True
 
 
 def _entry(command: str) -> dict:
@@ -299,8 +361,14 @@ def install(repo: Path, python: str | None = None) -> dict:
     data_dir = log_module.ensure_dir(repo / ".agentlog")
     claude_md_added = write_claude_md(repo)
     skill = write_skill(repo)
+    try:
+        git_hook, git_hook_added = write_git_hook(repo)
+    except ConfigError:
+        git_hook, git_hook_added = None, False
 
     return {
+        "git_hook": str(git_hook) if git_hook else None,
+        "git_hook_added": git_hook_added,
         "skill": str(skill),
         "claude_md": str(repo / "CLAUDE.md"),
         "claude_md_added": claude_md_added,
@@ -377,7 +445,36 @@ def diagnose(repo: Path) -> list[tuple[str, bool, str]]:
         ok = bool(baked) and os.access(baked, os.X_OK)
         checks.append(("interpreter valid", ok, baked or "not found in the hook script"))
 
+    import subprocess as _sp
+
+    for event in (*_CAPTURE_EVENTS, *_INJECT_EVENTS):
+        hook = repo / ".claude" / HOOKS_DIRNAME / f"agentlog-{event.lower()}.sh"
+        if not hook.is_file():
+            continue
+        try:
+            done = _sp.run(["/bin/sh", "-n", str(hook)], capture_output=True, text=True, timeout=20)
+            ok = done.returncode == 0
+            note = "parses" if ok else done.stderr.strip()[:80]
+        except (OSError, _sp.SubprocessError) as exc:
+            ok, note = False, str(exc)[:80]
+        checks.append((f"{event} script valid", ok, note))
+
     checks.append(("git available", _shutil.which("git") is not None, "needed for anchors"))
+
+    post_commit = repo / ".git" / "hooks" / "post-commit"
+    installed = post_commit.is_file() and _GIT_HOOK_BEGIN in post_commit.read_text(
+        encoding="utf-8", errors="replace"
+    )
+    checks.append(
+        ("git post-commit hook", installed, str(post_commit) if installed else "not installed")
+    )
+    checks.append(
+        (
+            "agentlog on PATH",
+            _shutil.which("agentlog") is not None,
+            "the git hook calls it by name",
+        )
+    )
     data = repo / ".agentlog"
     checks.append(("data directory", data.is_dir(), str(data)))
 
